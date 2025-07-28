@@ -663,12 +663,13 @@ const registerTools = (fastifyInstance, serverInstance) => {
     // -------------------- Product name search tool --------------------
     serverInstance.registerTool('search-product-vector', {
         title: 'Search product by name (vector)',
-        description: 'Fuzzy vector search over product names via LanceDB',
+        description: 'Fuzzy vector search over product names via LanceDB. Accepts either structured vehicle parameters or a single vehicleText to parse automatically.',
         inputSchema: {
             name: zod_1.z.string().describe('Partial or full product name'),
-            vehicleBrand: zod_1.z.string().describe('Vehicle brand to filter results'),
-            vehicleModel: zod_1.z.string().describe('Vehicle model to filter results'),
-            vehicleVariant: zod_1.z.string().optional().describe('Vehicle variant to filter results')
+            vehicleBrand: zod_1.z.string().optional().describe('Vehicle brand to filter results'),
+            vehicleModel: zod_1.z.string().optional().describe('Vehicle model to filter results'),
+            vehicleVariant: zod_1.z.string().optional().describe('Vehicle variant to filter results'),
+            vehicleText: zod_1.z.string().optional().describe('Full vehicle description (e.g., "citroen c5 limousine") - will be parsed automatically')
         },
         outputSchema: {
             total: zod_1.z.number(),
@@ -680,14 +681,34 @@ const registerTools = (fastifyInstance, serverInstance) => {
                 vehicleVariant: zod_1.z.string()
             })).describe('List of matching products with vehicle details')
         }
-    }, async ({ name, vehicleBrand, vehicleModel, vehicleVariant }) => {
+    }, async ({ name, vehicleBrand, vehicleModel, vehicleVariant, vehicleText }) => {
         try {
-            // Embed the query
-            const queryEmbedding = await (0, embed_1.embed)(name);
+            // Parse vehicle information from vehicleText if provided
+            let parsedBrand = vehicleBrand;
+            let parsedModel = vehicleModel;
+            let parsedVariant = vehicleVariant;
+            if (vehicleText) {
+                const vehicleParts = vehicleText.trim().split(/\s+/);
+                if (vehicleParts.length >= 2) {
+                    parsedBrand = parsedBrand || vehicleParts[0];
+                    parsedModel = parsedModel || vehicleParts[1];
+                    // Use remaining parts as variant if not explicitly provided
+                    if (!parsedVariant && vehicleParts.length > 2) {
+                        parsedVariant = vehicleParts.slice(2).join(' ');
+                    }
+                }
+            }
+            // Validate that we have at least brand and model
+            if (!parsedBrand || !parsedModel) {
+                throw new Error('Vehicle brand and model are required (either as separate parameters or in vehicleText)');
+            }
+            // Embed the query using the same format as ingestion
+            const queryEmbedding = await (0, embed_1.embed)(`${name} | ${parsedBrand} | ${parsedModel} | ${parsedVariant || ''}`);
             // Access the pre-opened LanceDB products table
             const table = fastifyInstance.lance.productsTable;
             // Perform vector search and load metadata columns
             let hits = await table.search(queryEmbedding)
+                .limit(100)
                 .select([
                 'productNumber',
                 'productName',
@@ -696,12 +717,32 @@ const registerTools = (fastifyInstance, serverInstance) => {
                 'vehicleVariant'
             ])
                 .toArray();
-            // Filter by brand and model
-            hits = hits.filter((r) => r.vehicleBrand.toLowerCase().includes(vehicleBrand.toLowerCase()) &&
-                r.vehicleModel.toLowerCase().includes(vehicleModel.toLowerCase()));
-            // If variant provided, further filter by variant
-            if (vehicleVariant) {
-                hits = hits.filter((r) => r.vehicleVariant.toLowerCase().includes(vehicleVariant.toLowerCase()));
+            // Helper function to normalize text (remove accents and convert to lowercase)
+            const normalizeText = (text) => text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            // Filter by brand and model with accent normalization
+            hits = hits.filter((r) => normalizeText(r.vehicleBrand).includes(normalizeText(parsedBrand)) &&
+                normalizeText(r.vehicleModel).includes(normalizeText(parsedModel)));
+            // If variant provided, further filter by variant with accent normalization
+            if (parsedVariant) {
+                const baseVariantTerms = ['standard', 'base', 'basic', 'base variant'];
+                const isBaseVariantRequest = baseVariantTerms.some(term => normalizeText(parsedVariant).includes(normalizeText(term)));
+                if (isBaseVariantRequest) {
+                    // Filter for products with empty/null variants (base variant)
+                    hits = hits.filter((r) => !r.vehicleVariant || !r.vehicleVariant.trim());
+                }
+                else {
+                    // Use normal variant filtering
+                    hits = hits.filter((r) => normalizeText(r.vehicleVariant).includes(normalizeText(parsedVariant)));
+                }
+            }
+            // Add simple text filtering: if user searches for specific words, filter by those words
+            const searchWords = name.toLowerCase().split(/\s+/).filter((word) => word.length > 1);
+            if (searchWords.length > 0) {
+                hits = hits.filter((r) => {
+                    const productNameLower = r.productName.toLowerCase();
+                    // Product must contain ALL words from the search query
+                    return searchWords.every((word) => productNameLower.includes(word));
+                });
             }
             // Map results
             const products = hits.map((r) => ({
@@ -713,11 +754,98 @@ const registerTools = (fastifyInstance, serverInstance) => {
             }));
             const total = products.length;
             const structured = { total, products };
+            // If no variant specified and we have results, show model/variant selection
+            if (!parsedVariant && total > 0) {
+                // First check if we have multiple vehicle models
+                const uniqueModels = [...new Set(products.map((p) => p.vehicleModel))]
+                    .filter(model => model && typeof model === 'string')
+                    .sort(); // Sort alphabetically for better UX
+                if (uniqueModels.length > 1) {
+                    // Multiple models found - show models with their variants
+                    const modelVariantMap = new Map();
+                    products.forEach((p) => {
+                        const model = p.vehicleModel;
+                        const variant = p.vehicleVariant && p.vehicleVariant.trim() ? p.vehicleVariant : null;
+                        if (!modelVariantMap.has(model)) {
+                            modelVariantMap.set(model, { variants: new Set(), hasBaseVariant: false });
+                        }
+                        const modelData = modelVariantMap.get(model);
+                        if (variant) {
+                            modelData.variants.add(variant);
+                        }
+                        else {
+                            modelData.hasBaseVariant = true;
+                        }
+                    });
+                    const modelList = Array.from(modelVariantMap.entries())
+                        .sort(([a], [b]) => a.localeCompare(b))
+                        .map(([model, modelData]) => {
+                        const variantList = [];
+                        if (modelData.hasBaseVariant) {
+                            variantList.push('base variant');
+                        }
+                        variantList.push(...Array.from(modelData.variants));
+                        const variantText = variantList.length > 0 ? ` (${variantList.join(', ')})` : '';
+                        return `• ${model}${variantText}`;
+                    })
+                        .join('\n');
+                    return {
+                        structuredContent: {
+                            total: 0, // No actual products, just model selection
+                            products: [] // Empty array to satisfy schema
+                        },
+                        content: [
+                            {
+                                type: 'text',
+                                text: `I found ${name} for these ${parsedBrand} models:\n${modelList}\n\nWhich model and variant is your vehicle?`
+                            }
+                        ]
+                    };
+                }
+                if (uniqueModels.length === 1) {
+                    // Single model - check for variants
+                    const variantList = [];
+                    const hasBaseVariant = products.some((p) => !p.vehicleVariant || !p.vehicleVariant.trim());
+                    const uniqueVariants = [...new Set(products.map((p) => p.vehicleVariant))]
+                        .filter(variant => variant && typeof variant === 'string' && variant.trim()) // Get non-empty variants
+                        .sort(); // Sort alphabetically for better UX
+                    if (hasBaseVariant) {
+                        variantList.push('base variant');
+                    }
+                    variantList.push(...uniqueVariants);
+                    if (variantList.length > 1) {
+                        const variantDisplay = variantList.map(variant => `• ${variant}`).join('\n');
+                        return {
+                            structuredContent: {
+                                total: 0, // No actual products, just variant selection
+                                products: [] // Empty array to satisfy schema
+                            },
+                            content: [
+                                {
+                                    type: 'text',
+                                    text: `I found ${name} for these ${parsedBrand} ${parsedModel} variants:\n${variantDisplay}\n\nCan you specify which variant your vehicle is?`
+                                }
+                            ]
+                        };
+                    }
+                }
+            }
             if (total > 1) {
-                const variantLines = products
-                    .map((p) => {
+                // Group products by identical display name and vehicle info
+                const productGroups = new Map();
+                products.forEach((p) => {
                     const cleanName = p.productName.replace(/^JAEGER automotive\s*/i, '').trim();
-                    return `• [${p.productNumber}] ${cleanName} – ${p.vehicleBrand} ${p.vehicleModel} ${p.vehicleVariant}`;
+                    const vehicleInfo = `${p.vehicleBrand} ${p.vehicleModel} ${p.vehicleVariant}`.trim();
+                    const displayKey = `${cleanName} for ${vehicleInfo}`;
+                    if (!productGroups.has(displayKey)) {
+                        productGroups.set(displayKey, []);
+                    }
+                    productGroups.get(displayKey).push(p.productNumber);
+                });
+                const variantLines = Array.from(productGroups.entries())
+                    .map(([displayName, productNumbers]) => {
+                    const numbersList = productNumbers.join(', ');
+                    return `• ${displayName} (${numbersList})`;
                 })
                     .join('\n');
                 return {
@@ -733,12 +861,13 @@ const registerTools = (fastifyInstance, serverInstance) => {
             if (total === 1) {
                 const p = products[0];
                 const cleanName = p.productName.replace(/^JAEGER automotive\s*/i, '').trim();
+                const vehicleInfo = `${p.vehicleBrand} ${p.vehicleModel} ${p.vehicleVariant}`.trim();
                 return {
                     structuredContent: structured,
                     content: [
                         {
                             type: 'text',
-                            text: `Found one product: [${p.productNumber}] ${cleanName} – ${p.vehicleBrand} ${p.vehicleModel} ${p.vehicleVariant}`
+                            text: `Found one product: ${cleanName} for ${vehicleInfo} (${p.productNumber})`
                         }
                     ]
                 };
