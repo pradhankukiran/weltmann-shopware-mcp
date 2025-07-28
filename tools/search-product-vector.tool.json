@@ -1,0 +1,56 @@
+{
+  "name": "search-product-vector",
+  "description": "Fuzzy vector search over product names via LanceDB",
+  "endpoint": {
+    "method": "POST",
+    "path": "/mcp",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "jsonrpc": "2.0",
+      "method": "search-product-vector",
+      "params": {
+        "name": "{{name}}",
+        "limit": "{{limit}}"
+      },
+      "id": 1
+    }
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Partial or full product name"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Max results to return",
+        "default": 5,
+        "minimum": 1
+      }
+    },
+    "required": ["name"]
+  },
+  "response": {
+    "type": "object",
+    "properties": {
+      "total": {
+        "type": "integer",
+        "description": "Total number of matching products"
+      },
+      "products": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "productNumber": { "type": "string" },
+            "name": { "type": "string" }
+          },
+          "required": ["productNumber", "name"]
+        }
+      }
+    },
+    "required": ["total", "products"]
+  },
+  "responseKey": "result.structuredContent"
+} 

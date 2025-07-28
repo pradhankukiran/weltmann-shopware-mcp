@@ -1,0 +1,51 @@
+{
+  "name": "search_products",
+  "description": "Search for products in Shopware by keyword. Returns up to the specified limit of product basics (id, name, productNumber, stock, active).",
+  "endpoint": {
+    "method": "GET",
+    "path": "/v1/products/search",
+    "query": {
+      "term": "string – search keyword (required)",
+      "limit": "integer – maximum number of results (optional)"
+    }
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "term": {
+        "type": "string",
+        "description": "Search keyword or product name"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum results to return",
+        "default": 10,
+        "minimum": 1,
+        "maximum": 100
+      }
+    },
+    "required": ["term"]
+  },
+  "response": {
+    "type": "object",
+    "properties": {
+      "total": {
+        "type": "integer",
+        "description": "Total number of matching products"
+      },
+      "products": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "productNumber": { "type": "string" },
+            "stock": { "type": "integer" },
+            "active": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+} 
