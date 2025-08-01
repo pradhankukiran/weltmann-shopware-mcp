@@ -9,7 +9,14 @@
     "start": "node dist/src/index.js",
     "lint": "eslint . --ext .ts",
     "test": "jest",
-    "ingest": "ts-node scripts/ingest-products.ts"
+    "ingest": "ts-node scripts/ingest-products.ts",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop weltmann-shopware-mcp",
+    "pm2:restart": "pm2 restart weltmann-shopware-mcp",
+    "pm2:delete": "pm2 delete weltmann-shopware-mcp",
+    "pm2:logs": "pm2 logs weltmann-shopware-mcp",
+    "pm2:status": "pm2 status",
+    "pm2:monit": "pm2 monit"
   },
   "keywords": [],
   "author": "",

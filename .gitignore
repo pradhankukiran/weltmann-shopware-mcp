@@ -3,3 +3,7 @@ node_modules/
 lancedb/
 data/
 .claude
+
+# PM2 logs
+logs/*.log
+.pm2/

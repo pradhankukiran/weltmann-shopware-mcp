@@ -72,6 +72,9 @@ The system is built with a modular plugin architecture:
    
    # Production mode
    npm start
+   
+   # Production with PM2 (recommended for deployment)
+   npm run pm2:start
    ```
 
 ##  Configuration
@@ -110,9 +113,47 @@ npm run dev
 
 # Production build and start
 npm run build && npm start
+
+# Production with PM2 process manager (recommended for deployment)
+npm run build && npm run pm2:start
 ```
 
 The server will start on `http://localhost:3000` (or your configured PORT).
+
+### PM2 Production Deployment
+
+For production deployments, especially on cloud servers like EC2, use PM2 for process management:
+
+```bash
+# First, install PM2 globally
+npm install -g pm2
+
+# Build and start with PM2
+npm run build
+npm run pm2:start
+
+# Monitor your application
+npm run pm2:status
+npm run pm2:logs
+
+# Setup auto-start on server reboot
+pm2 save
+pm2 startup
+# Follow the command output to setup startup script
+
+# Other PM2 commands
+npm run pm2:restart  # Restart the application
+npm run pm2:stop     # Stop the application
+npm run pm2:monit    # Real-time monitoring dashboard
+```
+
+**PM2 Benefits:**
+- Auto-restart on crashes
+- Memory leak protection (auto-restart on memory limit)
+- Zero-downtime deployments
+- Built-in load balancing
+- Process monitoring and logging
+- Startup script generation for server reboots
 
 ### API Endpoints
 
@@ -240,6 +281,14 @@ npm test
 
 # Build for production
 npm run build
+
+# PM2 process management (production)
+npm run pm2:start    # Start with PM2
+npm run pm2:stop     # Stop the process
+npm run pm2:restart  # Restart the process
+npm run pm2:logs     # View logs
+npm run pm2:status   # Check status
+npm run pm2:monit    # Real-time monitoring
 ```
 
 ### Adding New MCP Tools
