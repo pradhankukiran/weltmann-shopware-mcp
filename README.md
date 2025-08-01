@@ -186,7 +186,7 @@ npm run pm2:status
 
 ### API Endpoints
 
-- **Health Check**: `GET /healthz`
+- **Health Check**: `GET /health`
 - **Swagger Documentation**: `GET /docs`
 - **Product Search**: `GET /v1/products/search?term=keyword&limit=10`
 - **MCP Endpoint**: `POST /mcp` (for AI model integration)
@@ -369,7 +369,7 @@ LOG_LEVEL=debug npm run dev
 
 The server includes built-in health checks and logging:
 
-- **Health Endpoint**: `GET /healthz`
+- **Health Endpoint**: `GET /health`
 - **Structured Logging**: JSON format with request tracing
 - **Error Handling**: Comprehensive error responses with context
 

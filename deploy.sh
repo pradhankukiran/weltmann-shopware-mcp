@@ -115,8 +115,9 @@ echo ""
 print_status "Testing server health..."
 sleep 2  # Give server a moment to start
 
-if curl -s -f http://localhost:3000/healthz > /dev/null; then
+if curl -s -f http://localhost:3000/health > /dev/null; then
     print_success "Server is responding to health check"
+    print_status "Health endpoint: http://localhost:3000/health"
 else
     print_warning "Server health check failed (may still be starting up)"
     print_status "Check logs with: npm run pm2:logs"
