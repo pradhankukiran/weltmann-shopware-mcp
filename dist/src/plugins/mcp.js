@@ -894,6 +894,292 @@ const registerTools = (fastifyInstance, serverInstance) => {
             };
         }
     });
+    // -------------------- Customer search tool --------------------
+    /**
+     * Tool: search-customer
+     * ---------------------
+     * Find customers by various criteria like email, customer number, name, or phone.
+     * Returns customer details including contact information and addresses.
+     *
+     * Input  – `customerInputShape` (zod)
+     *   • email?:          string  – customer email address
+     *   • customerNumber?: string  – customer number
+     *   • firstName?:      string  – first name (partial match)
+     *   • lastName?:       string  – last name (partial match)
+     *   • phone?:          string  – phone number
+     *
+     * Output – `customerOutputShape` (zod)
+     *   • total:     number     – total number of matching customers
+     *   • customers: Customer[] – customer details with addresses
+     */
+    const customerInputShape = {
+        email: zod_1.z.string().optional(),
+        customerNumber: zod_1.z.string().optional(),
+        firstName: zod_1.z.string().optional(),
+        lastName: zod_1.z.string().optional(),
+        phone: zod_1.z.string().optional()
+    };
+    const customerOutputShape = {
+        total: zod_1.z.number(),
+        customers: zod_1.z.array(zod_1.z.object({
+            id: zod_1.z.string(),
+            customerNumber: zod_1.z.string().nullable(),
+            email: zod_1.z.string(),
+            firstName: zod_1.z.string().nullable(),
+            lastName: zod_1.z.string().nullable(),
+            title: zod_1.z.string().nullable(),
+            active: zod_1.z.boolean(),
+            defaultBillingAddress: zod_1.z.object({
+                street: zod_1.z.string().nullable(),
+                zipcode: zod_1.z.string().nullable(),
+                city: zod_1.z.string().nullable(),
+                country: zod_1.z.string().nullable(),
+                phoneNumber: zod_1.z.string().nullable()
+            }).nullable(),
+            defaultShippingAddress: zod_1.z.object({
+                street: zod_1.z.string().nullable(),
+                zipcode: zod_1.z.string().nullable(),
+                city: zod_1.z.string().nullable(),
+                country: zod_1.z.string().nullable(),
+                phoneNumber: zod_1.z.string().nullable()
+            }).nullable()
+        }))
+    };
+    serverInstance.registerTool('search-customer', {
+        title: 'Search customers',
+        description: 'Find customers by email, customer number, name, or phone',
+        inputSchema: customerInputShape,
+        outputSchema: customerOutputShape
+    }, async ({ email, customerNumber, firstName, lastName, phone }) => {
+        // Build search criteria based on provided inputs
+        const filters = [];
+        if (email) {
+            filters.push({ type: 'equals', field: 'email', value: email });
+        }
+        if (customerNumber) {
+            filters.push({ type: 'equals', field: 'customerNumber', value: customerNumber });
+        }
+        if (firstName) {
+            filters.push({ type: 'contains', field: 'firstName', value: firstName });
+        }
+        if (lastName) {
+            filters.push({ type: 'contains', field: 'lastName', value: lastName });
+        }
+        if (phone) {
+            // Search in both billing and shipping address phone numbers
+            filters.push({
+                type: 'multi',
+                operator: 'OR',
+                queries: [
+                    { type: 'contains', field: 'defaultBillingAddress.phoneNumber', value: phone },
+                    { type: 'contains', field: 'defaultShippingAddress.phoneNumber', value: phone }
+                ]
+            });
+        }
+        if (filters.length === 0) {
+            const emptyStructured = { total: 0, customers: [] };
+            return {
+                structuredContent: emptyStructured,
+                content: withStructuredJson(emptyStructured, [
+                    { type: 'text', text: 'Please provide at least one search criterion (email, customer number, name, or phone).' }
+                ])
+            };
+        }
+        const criteria = {
+            filter: filters.length === 1 ? filters : [{ type: 'multi', operator: 'AND', queries: filters }],
+            associations: {
+                defaultBillingAddress: {
+                    associations: { country: {} }
+                },
+                defaultShippingAddress: {
+                    associations: { country: {} }
+                }
+            },
+            limit: 50 // Reasonable limit for customer search
+        };
+        const result = await fastifyInstance.shopware.searchCustomers(criteria);
+        const cleaned = stripExtensionsDeep(result);
+        const customers = (cleaned.data || []).map((c) => ({
+            id: c.id,
+            customerNumber: c.customerNumber ?? null,
+            email: c.email,
+            firstName: c.firstName ?? null,
+            lastName: c.lastName ?? null,
+            title: c.title ?? null,
+            active: c.active ?? true,
+            defaultBillingAddress: c.defaultBillingAddress ? {
+                street: c.defaultBillingAddress.street ?? null,
+                zipcode: c.defaultBillingAddress.zipcode ?? null,
+                city: c.defaultBillingAddress.city ?? null,
+                country: c.defaultBillingAddress.country?.name ?? null,
+                phoneNumber: c.defaultBillingAddress.phoneNumber ?? null
+            } : null,
+            defaultShippingAddress: c.defaultShippingAddress ? {
+                street: c.defaultShippingAddress.street ?? null,
+                zipcode: c.defaultShippingAddress.zipcode ?? null,
+                city: c.defaultShippingAddress.city ?? null,
+                country: c.defaultShippingAddress.country?.name ?? null,
+                phoneNumber: c.defaultShippingAddress.phoneNumber ?? null
+            } : null
+        }));
+        const total = cleaned.total ?? customers.length;
+        const structured = { total, customers };
+        if (total === 0) {
+            return {
+                structuredContent: structured,
+                content: withStructuredJson(structured, [
+                    { type: 'text', text: 'No customers found matching the search criteria.' }
+                ])
+            };
+        }
+        if (total === 1) {
+            const c = customers[0];
+            const fullName = [c.title, c.firstName, c.lastName].filter(Boolean).join(' ');
+            const billingAddr = c.defaultBillingAddress;
+            const shippingAddr = c.defaultShippingAddress;
+            let addressInfo = '';
+            if (billingAddr) {
+                addressInfo += `\nBilling: ${billingAddr.street}, ${billingAddr.zipcode} ${billingAddr.city}, ${billingAddr.country}`;
+                if (billingAddr.phoneNumber) {
+                    addressInfo += `\nPhone: ${billingAddr.phoneNumber}`;
+                }
+            }
+            if (shippingAddr && JSON.stringify(shippingAddr) !== JSON.stringify(billingAddr)) {
+                addressInfo += `\nShipping: ${shippingAddr.street}, ${shippingAddr.zipcode} ${shippingAddr.city}, ${shippingAddr.country}`;
+            }
+            return {
+                structuredContent: structured,
+                content: withStructuredJson(structured, [
+                    {
+                        type: 'text',
+                        text: `**Customer Found:**\n${fullName}\nEmail: ${c.email}\nCustomer #: ${c.customerNumber ?? 'n/a'}${addressInfo}`
+                    }
+                ])
+            };
+        }
+        // Multiple customers found
+        const customerList = customers.slice(0, 10).map((c) => {
+            const fullName = [c.title, c.firstName, c.lastName].filter(Boolean).join(' ');
+            return `• ${fullName} (${c.email}) - Customer #${c.customerNumber ?? 'n/a'}`;
+        }).join('\n');
+        const displayStructured = { total, customers: customers.slice(0, 10) };
+        return {
+            structuredContent: displayStructured,
+            content: withStructuredJson(displayStructured, [
+                {
+                    type: 'text',
+                    text: `Found ${total} customer(s):\n${customerList}${total > 10 ? '\n...and more' : ''}\n\nProvide more specific criteria to narrow down the results.`
+                }
+            ])
+        };
+    });
+    // -------------------- Customer orders tool --------------------
+    /**
+     * Tool: get-customer-orders
+     * --------------------------
+     * Retrieve all orders for a specific customer, either by customer ID or email.
+     *
+     * Input  – `customerOrdersInputShape` (zod)
+     *   • customerId?: string – customer ID from search-customer
+     *   • email?:      string – customer email address
+     *   • limit?:      number – max orders to return (defaults to 10)
+     *
+     * Output – Same as search-orders output
+     */
+    const customerOrdersInputShape = {
+        customerId: zod_1.z.string().optional(),
+        email: zod_1.z.string().optional(),
+        limit: zod_1.z.number().min(1).max(100).optional()
+    };
+    serverInstance.registerTool('get-customer-orders', {
+        title: 'Get customer orders',
+        description: 'Get all orders for a specific customer by ID or email',
+        inputSchema: customerOrdersInputShape,
+        outputSchema: orderOutputShape
+    }, async ({ customerId, email, limit }) => {
+        if (!customerId && !email) {
+            const emptyStructured = { total: 0, orders: [] };
+            return {
+                structuredContent: emptyStructured,
+                content: withStructuredJson(emptyStructured, [
+                    { type: 'text', text: 'Please provide either a customer ID or email address.' }
+                ])
+            };
+        }
+        let searchCustomerId = customerId;
+        // If email provided but no customer ID, look up customer first
+        if (email && !customerId) {
+            const customerResult = await fastifyInstance.shopware.searchCustomersByEmail(email, false);
+            const cleanedCustomers = stripExtensionsDeep(customerResult);
+            if (cleanedCustomers.total === 0) {
+                const emptyStructured = { total: 0, orders: [] };
+                return {
+                    structuredContent: emptyStructured,
+                    content: withStructuredJson(emptyStructured, [
+                        { type: 'text', text: `No customer found with email address: ${email}` }
+                    ])
+                };
+            }
+            searchCustomerId = cleanedCustomers.data[0].id;
+        }
+        // Search orders for the customer
+        const criteria = {
+            filter: [{ type: 'equals', field: 'orderCustomer.customerId', value: searchCustomerId }],
+            limit: limit || 10,
+            sort: [{ field: 'orderDateTime', order: 'DESC' }],
+            associations: {
+                stateMachineState: {},
+                transactions: {
+                    associations: {
+                        stateMachineState: {},
+                        paymentMethod: {}
+                    }
+                },
+                deliveries: {
+                    associations: {
+                        stateMachineState: {},
+                        shippingMethod: {},
+                        shippingOrderAddress: {
+                            associations: { country: {} }
+                        }
+                    }
+                },
+                orderCustomer: {},
+                salesChannel: {},
+                lineItems: {
+                    associations: { product: {} }
+                }
+            }
+        };
+        const result = await fastifyInstance.shopware.searchOrders(criteria);
+        const cleaned = stripExtensionsDeep(result);
+        const essentials = {
+            total: cleaned.total,
+            orders: (cleaned.data || []).map(mapEssentials)
+        };
+        if (essentials.total === 0) {
+            return {
+                structuredContent: essentials,
+                content: withStructuredJson(essentials, [
+                    { type: 'text', text: `No orders found for this customer.` }
+                ])
+            };
+        }
+        // Show customer's order history
+        const customerName = essentials.orders[0]?.customer?.firstName && essentials.orders[0]?.customer?.lastName
+            ? `${essentials.orders[0].customer.firstName} ${essentials.orders[0].customer.lastName}`
+            : essentials.orders[0]?.customer?.email || 'Customer';
+        const orderList = essentials.orders.map((o) => `• Order #${o.customer.orderNumber} - ${o.customer.orderDateTime} - €${o.totals.amountTotal} - ${o.status.overall}`).join('\n');
+        return {
+            structuredContent: essentials,
+            content: withStructuredJson(essentials, [
+                {
+                    type: 'text',
+                    text: `**${customerName}'s Orders (${essentials.total} total):**\n${orderList}\n\nUse search-orders with a specific order number for detailed information.`
+                }
+            ])
+        };
+    });
     // (Additional tools can be registered here)
 };
 // Stateless MCP endpoint using the above tools

@@ -243,4 +243,106 @@ export class ShopwareAdminClient {
     const { data } = await this.post<any>('/search/product', payload);
     return data;
   }
+
+  /**
+   * Generic customer search helper. Accepts a full Shopware criteria object and returns the raw response.
+   * Caller can specify paging, filters, associations, etc.
+   */
+  async searchCustomers(criteria: Record<string, any>) {
+    const { data } = await this.post<any>('/search/customer', criteria);
+    return data;
+  }
+
+  /**
+   * Convenience helper to look up customers by email address.
+   */
+  async searchCustomersByEmail(email: string, includeAllFields = false) {
+    const payload: any = {
+      filter: [
+        { type: 'equals', field: 'email', value: email }
+      ]
+    };
+
+    if (!includeAllFields) {
+      payload.includes = {
+        customer: [
+          'id',
+          'customerNumber',
+          'email',
+          'firstName',
+          'lastName',
+          'title',
+          'active'
+        ]
+      };
+    } else {
+      payload.associations = {
+        defaultBillingAddress: {
+          associations: { country: {} }
+        },
+        defaultShippingAddress: {
+          associations: { country: {} }
+        },
+        addresses: {
+          associations: { country: {} }
+        }
+      };
+    }
+
+    const { data } = await this.post<any>('/search/customer', payload);
+    return data;
+  }
+
+  /**
+   * Find all orders for a specific customer by customer ID.
+   */
+  async searchOrdersByCustomer(customerId: string, includeAllFields = false) {
+    const payload: any = {
+      filter: [
+        { type: 'equals', field: 'orderCustomer.customerId', value: customerId }
+      ],
+      sort: [
+        { field: 'orderDateTime', order: 'DESC' }
+      ]
+    };
+
+    if (!includeAllFields) {
+      payload.includes = {
+        order: [
+          'id',
+          'orderNumber',
+          'orderDateTime',
+          'amountTotal',
+          'stateId'
+        ]
+      };
+    } else {
+      payload.associations = {
+        stateMachineState: {},
+        transactions: {
+          associations: {
+            stateMachineState: {},
+            paymentMethod: {}
+          }
+        },
+        deliveries: {
+          associations: {
+            stateMachineState: {},
+            shippingMethod: {},
+            shippingOrderAddress: {
+              associations: { country: {} }
+            }
+          }
+        },
+        orderCustomer: {},
+        salesChannel: {},
+        lineItems: {
+          associations: { product: {} }
+        }
+      };
+    }
+
+    const { data } = await this.post<any>('/search/order', payload);
+    return data;
+  }
 } 
