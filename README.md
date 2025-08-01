@@ -155,6 +155,35 @@ npm run pm2:monit    # Real-time monitoring dashboard
 - Process monitoring and logging
 - Startup script generation for server reboots
 
+### Automated Deployment
+
+For easy deployments, use the provided deployment script:
+
+```bash
+# Make the script executable (first time only)
+chmod +x deploy.sh
+
+# Deploy latest changes
+./deploy.sh
+```
+
+**What the deployment script does:**
+1. Pulls latest changes from git
+2. Updates dependencies (`npm install`)
+3. Builds the project (`npm run build`)
+4. Restarts/starts PM2 process
+5. Saves PM2 configuration
+6. Shows final status and runs health check
+
+**Manual deployment** (if you prefer step-by-step):
+```bash
+git pull
+npm install
+npm run build
+npm run pm2:restart
+npm run pm2:status
+```
+
 ### API Endpoints
 
 - **Health Check**: `GET /healthz`
