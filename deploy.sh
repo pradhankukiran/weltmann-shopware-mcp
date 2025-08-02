@@ -41,7 +41,7 @@ fi
 
 # Step 1: Pull latest changes
 print_status "Step 1: Pulling latest changes from git..."
-if git pull; then
+if git pull --rebase; then
     print_success "Git pull completed successfully"
 else
     print_error "Git pull failed"
