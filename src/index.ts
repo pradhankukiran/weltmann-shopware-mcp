@@ -352,7 +352,7 @@ function generateHealthHTML(healthData: any): string {
             color: #374151;
             line-height: 1.6;
             min-height: 100vh;
-            padding: 24px;
+            padding: 20px;
         }
         .container { 
             max-width: 1200px; 
@@ -362,8 +362,8 @@ function generateHealthHTML(healthData: any): string {
             background: white;
             border: 1px solid #e5e7eb;
             border-radius: 8px;
-            padding: 24px;
-            margin-bottom: 24px;
+            padding: 20px;
+            margin-bottom: 20px;
             text-align: center;
         }
         .header h1 {
@@ -389,14 +389,14 @@ function generateHealthHTML(healthData: any): string {
         .cards {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-            gap: 24px;
-            margin-bottom: 24px;
+            gap: 20px;
+            margin-bottom: 20px;
         }
         .card {
             background: white;
             border: 1px solid #e5e7eb;
             border-radius: 8px;
-            padding: 24px;
+            padding: 20px;
             box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
         }
         .card h3 {
@@ -469,7 +469,7 @@ function generateHealthHTML(healthData: any): string {
             margin: 16px 0;
             display: flex;
             align-items: center;
-            gap: 24px;
+            gap: 20px;
         }
         .pie-chart {
             width: 120px;
