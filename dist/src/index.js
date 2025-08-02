@@ -39,6 +39,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const fastify_1 = __importDefault(require("fastify"));
 const swagger_1 = require("./plugins/swagger");
 const config_1 = require("./config");
+const os = __importStar(require("os"));
+const axios_1 = __importDefault(require("axios"));
 async function buildServer() {
     const config = (0, config_1.loadConfig)();
     const app = (0, fastify_1.default)({ logger: true });
@@ -52,6 +54,65 @@ async function buildServer() {
     await app.register((await Promise.resolve().then(() => __importStar(require('./plugins/lancedb')))).registerLanceDB);
     // MCP plugin (streamable HTTP)
     await app.register((await Promise.resolve().then(() => __importStar(require('./plugins/mcp')))).registerMcp);
+    // Dynamic favicon route
+    app.get('/favicon.ico', async (request, reply) => {
+        // Check service statuses for favicon color
+        let lancedbStatus = 'error';
+        let shopwareStatus = 'error';
+        let mcpStatus = 'error';
+        // Test LanceDB connection
+        try {
+            const table = app.lance?.productsTable;
+            if (table) {
+                await table.countRows();
+                lancedbStatus = 'connected';
+            }
+        }
+        catch (error) {
+            lancedbStatus = 'error';
+        }
+        // Test Shopware connection
+        try {
+            if (app.shopware) {
+                await app.shopware.get('/_info/version');
+                shopwareStatus = 'connected';
+            }
+        }
+        catch (error) {
+            shopwareStatus = 'error';
+        }
+        // Test MCP tools (lightweight test)
+        try {
+            if (app.shopware) {
+                // Test the same functionality that MCP tools rely on
+                await app.shopware.searchProductsByNumber('JA-000001', true);
+                mcpStatus = 'connected';
+            }
+        }
+        catch (error) {
+            mcpStatus = 'error';
+        }
+        // Determine favicon color based on all service statuses
+        const connectedServices = [lancedbStatus, shopwareStatus, mcpStatus].filter(s => s === 'connected').length;
+        const totalServices = 3;
+        let color;
+        if (connectedServices === totalServices) {
+            color = '#10b981'; // Green - all systems operational
+        }
+        else if (connectedServices === 0) {
+            color = '#ef4444'; // Red - all systems down
+        }
+        else {
+            color = '#f59e0b'; // Yellow - some systems down
+        }
+        const svg = generateFaviconSVG(color);
+        reply
+            .type('image/svg+xml')
+            .header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            .header('Pragma', 'no-cache')
+            .header('Expires', '0')
+            .send(svg);
+    });
     // Health check route with comprehensive system status
     app.get('/health', async (request, reply) => {
         const startTime = process.hrtime.bigint();
@@ -63,11 +124,38 @@ async function buildServer() {
             uptime: Math.floor(uptime),
             version: process.env.npm_package_version || '1.0.0',
             environment: process.env.NODE_ENV || 'development',
+            nodeVersion: process.version,
+            platform: process.platform,
+            architecture: process.arch,
+            processId: process.pid,
+            startTime: new Date(Date.now() - uptime * 1000).toISOString(),
+            cpuUsage: Math.round((process.cpuUsage().user + process.cpuUsage().system) / 1000) / 1000,
             memory: {
                 rss: Math.round(memoryUsage.rss / 1024 / 1024),
                 heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
                 heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
-                external: Math.round(memoryUsage.external / 1024 / 1024)
+                external: Math.round(memoryUsage.external / 1024 / 1024),
+                buffers: Math.round(memoryUsage.buffers / 1024 / 1024) || 0,
+                heapUtilization: Math.round((memoryUsage.heapUsed / memoryUsage.heapTotal) * 100),
+                totalSystemMemory: Math.round(os.totalmem() / 1024 / 1024 / 1024 * 100) / 100,
+                freeSystemMemory: Math.round(os.freemem() / 1024 / 1024 / 1024 * 100) / 100,
+                systemMemoryChart: (() => {
+                    const totalMB = Math.round(os.totalmem() / 1024 / 1024);
+                    const freeMB = Math.round(os.freemem() / 1024 / 1024);
+                    const processMB = Math.round(memoryUsage.rss / 1024 / 1024);
+                    const otherMB = totalMB - freeMB - processMB;
+                    const processPercent = Math.round((processMB / totalMB) * 100);
+                    const freePercent = Math.round((freeMB / totalMB) * 100);
+                    const otherPercent = 100 - processPercent - freePercent;
+                    return {
+                        processPercent,
+                        freePercent,
+                        otherPercent,
+                        processMB,
+                        freeMB,
+                        otherMB
+                    };
+                })()
             },
             services: {},
             responseTime: 0
@@ -127,6 +215,93 @@ async function buildServer() {
                     : 'Network or configuration error'
             };
         }
+        // Test MCP tools by making actual HTTP call to the MCP endpoint
+        const testProductNumber = 'JA-000001';
+        try {
+            // Make a real MCP tool call via HTTP JSON-RPC
+            const mcpRequest = {
+                jsonrpc: "2.0",
+                method: "tools/call",
+                params: {
+                    name: "get-stock-level",
+                    arguments: {
+                        productNumber: testProductNumber
+                    }
+                },
+                id: 1
+            };
+            const mcpResponse = await axios_1.default.post(`http://localhost:${config.PORT}/mcp`, mcpRequest, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json, text/event-stream'
+                },
+                timeout: 5000,
+                validateStatus: () => true // Don't throw on HTTP error codes
+            });
+            if (mcpResponse.status === 200) {
+                const responseBody = mcpResponse.data;
+                if (responseBody.error) {
+                    healthData.services.mcp = {
+                        status: 'error',
+                        testTool: 'get-stock-level',
+                        testProductNumber: testProductNumber,
+                        error: `JSON-RPC error: ${responseBody.error.message}`,
+                        errorCode: responseBody.error.code
+                    };
+                }
+                else {
+                    // MCP tool call succeeded
+                    const toolResult = responseBody.result;
+                    healthData.services.mcp = {
+                        status: 'connected',
+                        testTool: 'get-stock-level',
+                        testProductNumber: testProductNumber,
+                        testResult: toolResult ? 'tool_responded' : 'empty_response',
+                        hasContent: !!(toolResult?.content && toolResult.content.length > 0)
+                    };
+                }
+            }
+            else {
+                healthData.services.mcp = {
+                    status: 'error',
+                    testTool: 'get-stock-level',
+                    testProductNumber: testProductNumber,
+                    error: `HTTP ${mcpResponse.status}: ${mcpResponse.statusText}`,
+                    responseBody: typeof mcpResponse.data === 'string' ? mcpResponse.data.substring(0, 200) : JSON.stringify(mcpResponse.data).substring(0, 200)
+                };
+            }
+        }
+        catch (error) {
+            let errorMessage = 'Unknown error';
+            let isNetworkError = false;
+            if (axios_1.default.isAxiosError(error)) {
+                if (error.code === 'ECONNREFUSED') {
+                    errorMessage = 'Connection refused - MCP endpoint not available';
+                    isNetworkError = true;
+                }
+                else if (error.code === 'ETIMEDOUT') {
+                    errorMessage = 'Request timeout - MCP endpoint not responding';
+                    isNetworkError = true;
+                }
+                else if (error.response) {
+                    errorMessage = `HTTP ${error.response.status}: ${error.response.statusText}`;
+                }
+                else {
+                    errorMessage = error.message;
+                    isNetworkError = true;
+                }
+            }
+            else if (error instanceof Error) {
+                errorMessage = error.message;
+            }
+            healthData.services.mcp = {
+                status: 'error',
+                testTool: 'get-stock-level',
+                testProductNumber: testProductNumber,
+                error: errorMessage,
+                errorType: isNetworkError ? 'network' : 'unknown'
+            };
+        }
         // Calculate response time
         const endTime = process.hrtime.bigint();
         const responseTimeMs = Number(endTime - startTime) / 1000000;
@@ -153,6 +328,11 @@ async function buildServer() {
     });
     return { app, config };
 }
+function generateFaviconSVG(color) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <circle cx="16" cy="16" r="14" fill="${color}" stroke="white" stroke-width="2"/>
+</svg>`;
+}
 function generateHealthHTML(healthData) {
     const formatUptime = (seconds) => {
         const days = Math.floor(seconds / 86400);
@@ -174,6 +354,7 @@ function generateHealthHTML(healthData) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Weltmann Shopware MCP - Health Dashboard</title>
+    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <style>
         * { 
             margin: 0; 
@@ -299,6 +480,48 @@ function generateHealthHTML(healthData) {
             height: 100%;
             transition: width 0.3s ease;
         }
+        .memory-chart-section {
+            margin: 16px 0;
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+        .pie-chart {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: conic-gradient(
+                #3b82f6 0deg,
+                #3b82f6 var(--process-angle, 0deg),
+                #10b981 var(--process-angle, 0deg),
+                #10b981 var(--free-angle, 0deg),
+                #6b7280 var(--free-angle, 0deg),
+                #6b7280 360deg
+            );
+            position: relative;
+            flex-shrink: 0;
+        }
+        .chart-legend {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+        }
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+            flex-shrink: 0;
+        }
+        .legend-process { background-color: #3b82f6; }
+        .legend-free { background-color: #10b981; }
+        .legend-other { background-color: #6b7280; }
         .info-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -333,7 +556,7 @@ function generateHealthHTML(healthData) {
         .auto-refresh {
             position: fixed;
             top: 24px;
-            right: 24px;
+            right: 16px;
             background: white;
             border: 1px solid #e5e7eb;
             color: #374151;
@@ -346,7 +569,7 @@ function generateHealthHTML(healthData) {
 </head>
 <body>
     <div class="auto-refresh" id="refresh-indicator">
-        🔄 Auto-refresh: 30s
+        Auto-refresh: 30s
     </div>
     
     <div class="container">
@@ -378,6 +601,30 @@ function generateHealthHTML(healthData) {
                         <div class="info-label">Response Time</div>
                         <div class="info-value">${healthData.responseTime}ms</div>
                     </div>
+                    <div class="info-item">
+                        <div class="info-label">CPU Usage</div>
+                        <div class="info-value">${healthData.cpuUsage}ms</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Node.js</div>
+                        <div class="info-value">${healthData.nodeVersion}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Platform</div>
+                        <div class="info-value">${healthData.platform}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Process ID</div>
+                        <div class="info-value">${healthData.processId}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Start Date</div>
+                        <div class="info-value">${new Date(healthData.startTime).toLocaleDateString('en-GB')}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Start Time</div>
+                        <div class="info-value">${new Date(healthData.startTime).toLocaleTimeString('en-GB', { hour12: false })}</div>
+                    </div>
                 </div>
             </div>
 
@@ -386,11 +633,31 @@ function generateHealthHTML(healthData) {
                 <h3>Memory Usage</h3>
                 <div class="memory-section">
                     <div class="memory-header">
-                        <span>Heap Memory</span>
+                        <span>Heap Memory (${healthData.memory.heapUtilization}%)</span>
                         <span>${healthData.memory.heapUsed}MB / ${healthData.memory.heapTotal}MB</span>
                     </div>
                     <div class="memory-bar">
-                        <div class="memory-fill" style="width: ${(healthData.memory.heapUsed / healthData.memory.heapTotal) * 100}%;"></div>
+                        <div class="memory-fill" style="width: ${healthData.memory.heapUtilization}%;"></div>
+                    </div>
+                </div>
+                <div class="memory-chart-section">
+                    <div class="pie-chart" style="
+                        --process-angle: ${healthData.memory.systemMemoryChart.processPercent * 3.6}deg;
+                        --free-angle: ${(healthData.memory.systemMemoryChart.processPercent + healthData.memory.systemMemoryChart.freePercent) * 3.6}deg;
+                    "></div>
+                    <div class="chart-legend">
+                        <div class="legend-item">
+                            <div class="legend-color legend-process"></div>
+                            <span>Process (${healthData.memory.systemMemoryChart.processPercent}%) - ${healthData.memory.systemMemoryChart.processMB}MB</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color legend-free"></div>
+                            <span>Available (${healthData.memory.systemMemoryChart.freePercent}%) - ${healthData.memory.systemMemoryChart.freeMB}MB</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-color legend-other"></div>
+                            <span>Other Processes (${healthData.memory.systemMemoryChart.otherPercent}%) - ${healthData.memory.systemMemoryChart.otherMB}MB</span>
+                        </div>
                     </div>
                 </div>
                 <div class="info-grid">
@@ -402,6 +669,14 @@ function generateHealthHTML(healthData) {
                         <div class="info-label">External Memory</div>
                         <div class="info-value">${healthData.memory.external}MB</div>
                     </div>
+                    <div class="info-item">
+                        <div class="info-label">Buffer Memory</div>
+                        <div class="info-value">${healthData.memory.buffers}MB</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">System Memory</div>
+                        <div class="info-value">${healthData.memory.totalSystemMemory}GB</div>
+                    </div>
                 </div>
             </div>
 
@@ -412,13 +687,17 @@ function generateHealthHTML(healthData) {
                     <div class="service-status">
                         <div class="service-icon service-${service.status}"></div>
                         <div class="service-info">
-                            <div class="service-name">${name.charAt(0).toUpperCase() + name.slice(1)}</div>
+                            <div class="service-name">${name === 'lancedb' ? 'LanceDB' : name === 'mcp' ? 'MCP' : name.charAt(0).toUpperCase() + name.slice(1)}</div>
                             <div class="service-details">
                                 ${service.status === 'connected'
         ? name === 'lancedb'
             ? `${service.recordCount.toLocaleString()} records in ${service.tableName} table`
-            : `Version ${service.version} • ${service.apiUrl}`
-        : service.error || 'Unknown error'}
+            : name === 'mcp'
+                ? `test: ${service.testResult}`
+                : `Version ${service.version} • ${service.apiUrl}`
+        : name === 'mcp' && service.errorCode
+            ? `${service.error}<br>Product: ${service.testProductNumber || 'n/a'}${service.errorCode ? `<br>Code: ${service.errorCode}` : ''}`
+            : service.error || 'Unknown error'}
                             </div>
                         </div>
                     </div>
@@ -426,9 +705,6 @@ function generateHealthHTML(healthData) {
             </div>
         </div>
 
-        <div class="timestamp">
-            Last updated: ${new Date(healthData.timestamp).toLocaleString()}
-        </div>
     </div>
 
     <script>
@@ -436,7 +712,7 @@ function generateHealthHTML(healthData) {
         const refreshIndicator = document.getElementById('refresh-indicator');
         
         const updateCountdown = () => {
-            refreshIndicator.textContent = \`🔄 Auto-refresh: \${countdown}s\`;
+            refreshIndicator.textContent = \`Auto-refresh: \${countdown}s\`;
             countdown--;
             
             if (countdown < 0) {

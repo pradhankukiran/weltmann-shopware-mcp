@@ -190,8 +190,8 @@ async function buildServer() {
     }
 
     // Test MCP tools by making actual HTTP call to the MCP endpoint
+    const testProductNumber = 'JA-000001';
     try {
-      const testProductNumber = 'JA-000001';
       
       // Make a real MCP tool call via HTTP JSON-RPC
       const mcpRequest = {
