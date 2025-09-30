@@ -69,8 +69,8 @@ const route: FastifyPluginAsync = async (fastify) => {
     }
 
     const products = (result?.data || []).map((p: any) => ({
-      name: p.name,
-      description: stripHtml(p.description),
+      name: p.translated?.name ?? p.name ?? '',
+      description: stripHtml(p.translated?.description ?? p.description),
       availableStock: p.availableStock ?? p.stock ?? null
     }));
 

@@ -1,8 +1,7 @@
-import fp from 'fastify-plugin';
 import { FastifyPluginAsync } from 'fastify';
-
-import { ShopwareAdminClient } from '../shopware/adminClient';
+import fp from 'fastify-plugin';
 import { loadConfig } from '../config';
+import { ShopwareAdminClient } from '../shopware/adminClient';
 
 // Extend Fastify type
 declare module 'fastify' {

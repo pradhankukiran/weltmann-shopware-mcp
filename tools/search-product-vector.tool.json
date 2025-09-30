@@ -4,13 +4,19 @@
   "endpoint": {
     "method": "POST",
     "path": "/mcp",
-    "headers": { "Content-Type": "application/json" },
+    "headers": {
+      "Content-Type": "application/json"
+    },
     "body": {
       "jsonrpc": "2.0",
       "method": "search-product-vector",
       "params": {
         "name": "{{name}}",
-        "limit": "{{limit}}"
+        "limit": "{{limit}}",
+        "vehicleBrand": "{{vehicleBrand}}",
+        "vehicleModel": "{{vehicleModel}}",
+        "vehicleVariant": "{{vehicleVariant}}",
+        "vehicleText": "{{vehicleText}}"
       },
       "id": 1
     }
@@ -27,9 +33,27 @@
         "description": "Max results to return",
         "default": 5,
         "minimum": 1
+      },
+      "vehicleBrand": {
+        "type": "string",
+        "description": "Vehicle brand to filter results"
+      },
+      "vehicleModel": {
+        "type": "string",
+        "description": "Vehicle model to filter results"
+      },
+      "vehicleVariant": {
+        "type": "string",
+        "description": "Vehicle variant to filter results"
+      },
+      "vehicleText": {
+        "type": "string",
+        "description": "Full vehicle description (e.g., \"citroen c5 limousine\") to parse automatically"
       }
     },
-    "required": ["name"]
+    "required": [
+      "name"
+    ]
   },
   "response": {
     "type": "object",
@@ -43,14 +67,33 @@
         "items": {
           "type": "object",
           "properties": {
-            "productNumber": { "type": "string" },
-            "name": { "type": "string" }
+            "productNumber": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "vehicleBrand": {
+              "type": "string"
+            },
+            "vehicleModel": {
+              "type": "string"
+            },
+            "vehicleVariant": {
+              "type": "string"
+            }
           },
-          "required": ["productNumber", "name"]
+          "required": [
+            "productNumber",
+            "name"
+          ]
         }
       }
     },
-    "required": ["total", "products"]
+    "required": [
+      "total",
+      "products"
+    ]
   },
   "responseKey": "result.structuredContent"
-} 
+}

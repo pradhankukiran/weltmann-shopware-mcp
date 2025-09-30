@@ -1,8 +1,10 @@
-import fastify from 'fastify';
-import { registerSwagger } from './plugins/swagger';
-import { loadConfig } from './config';
 import * as os from 'os';
+
 import axios from 'axios';
+import fastify from 'fastify';
+
+import { loadConfig } from './config';
+import { registerSwagger } from './plugins/swagger';
 
 async function buildServer() {
   const config = loadConfig();

@@ -1,13 +1,14 @@
+import path from 'path';
+
+import { connect, type Connection, type Table } from '@lancedb/lancedb';
 import fp from 'fastify-plugin';
 import { FastifyPluginAsync } from 'fastify';
-import path from 'path';
-import * as lancedb from '@lancedb/lancedb';
 
 // Extend Fastify type to include lance client
 declare module 'fastify' {
   interface FastifyInstance {
     lance: {
-      productsTable: lancedb.Table;
+      productsTable: Table;
     };
   }
 }
@@ -17,7 +18,7 @@ export const registerLanceDB: FastifyPluginAsync = fp(async (fastify) => {
   const dbPath = path.resolve(process.cwd(), 'lancedb');
 
   // Connect to LanceDB (creates directory if it doesn't exist)
-  const db = await (lancedb as any).connect(dbPath);
+  const db: Connection = await connect(dbPath);
 
   // Open the products table
   const productsTable = await db.openTable('products');

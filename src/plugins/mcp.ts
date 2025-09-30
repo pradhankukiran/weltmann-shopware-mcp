@@ -14,15 +14,10 @@ const stripHtml = (html: string | null | undefined) => {
 // Helper to attach tools to a given server instance
 const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
   // Helper that clones content blocks and appends a JSON representation of the structured data
-  const withStructuredJson = (structured: any, contentBlocks: any[]) => {
-    return [
-      ...contentBlocks,
-      {
-        type: 'text',
-        text: `\n\nStructured data (JSON):\n\n${JSON.stringify(structured, null, 2)}`
-      }
-    ];
-  };
+  // Voice agents stumble over raw JSON in the spoken response, so keep
+  // the structured payload purely in `structuredContent` and return the
+  // original text blocks untouched.
+  const withStructuredJson = (_structured: any, contentBlocks: any[]) => contentBlocks;
 
   const inputShape = {
     productNumber: z.string()
@@ -50,13 +45,13 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
    * orders.
    *
    * Input  – `orderInputShape` (zod)
-   *   • orderNumber?: string  – exact Shopware order number to look up
-   *   • page?:        number  – pagination (defaults to 1)
-   *   • limit?:       number  – max items per page (1-250, defaults to 10)
+   *   orderNumber?: string  – exact Shopware order number to look up
+   *   page?:        number  – pagination (defaults to 1)
+   *   limit?:       number  – max items per page (1-250, defaults to 10)
    *
    * Output – `orderOutputShape` (zod)
-   *   • total:  number – total number of matching orders
-   *   • orders: Order[] – mapped essentials (customer, status, items, …)
+   *   total:  number – total number of matching orders
+   *   orders: Order[] – mapped essentials (customer, status, items, …)
    */
   const orderInputShape = {
     orderNumber: z.string().optional(),
@@ -108,13 +103,20 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
     )
   } as const;
 
+
   const stripExtensionsDeep = (input: any): any => {
-    if (Array.isArray(input)) return input.map(stripExtensionsDeep);
+    if (Array.isArray(input)) {
+      return input.map(item => stripExtensionsDeep(item));
+    }
+
     if (input && typeof input === 'object') {
       const { extensions, _uniqueIdentifier, versionId, translated, ...rest } = input as Record<string, any>;
-      for (const k of Object.keys(rest)) rest[k] = stripExtensionsDeep(rest[k]);
+      for (const key of Object.keys(rest)) {
+        rest[key] = stripExtensionsDeep(rest[key]);
+      }
       return rest;
     }
+
     return input;
   };
 
@@ -244,7 +246,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         // Build an item overview so the client sees the ordered products as well.
         const displayItems = ord.items.slice(0, 10);
         const itemLines = displayItems
-          .map((it: any) => `• ${it.quantity} × ${it.name} (PN: ${it.productNumber ?? 'n/a'}) – ${it.totalPrice}`)
+          .map((it: any) => `${it.quantity} × ${it.name} (PN: ${it.productNumber ?? 'n/a'}) – ${it.totalPrice}`)
           .join('\n');
 
         return {
@@ -265,7 +267,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
       // Generic list response
       const displayOrders = essentials.orders.slice(0, 10);
       const listLines = displayOrders
-        .map((o: any) => `• #${o.customer.orderNumber} – ${o.customer.orderDateTime}`)
+        .map((o: any) => `#${o.customer.orderNumber} – ${o.customer.orderDateTime}`)
         .join('\n');
 
       const listStructured = { total: essentials.total, orders: displayOrders } as const;
@@ -294,10 +296,10 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
    * Output – `outputShape` (zod)
    *
    * Behaviour:
-   *   • When no match is found, return a helpful text & an empty list.
-   *   • When exactly one product is found, return a concise summary including
+   *   When no match is found, return a helpful text & an empty list.
+   *   When exactly one product is found, return a concise summary including
    *     available stock & a short description.
-   *   • When multiple products match (e.g. number is not unique across variants)
+   *   When multiple products match (e.g. number is not unique across variants)
    *     return a shortlist and prompt the user for clarification.
    */
   serverInstance.registerTool(
@@ -312,9 +314,9 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
       const result = await fastifyInstance.shopware.searchProductsByNumber(productNumber, true);
 
       const products = (result?.data || []).map((p: any) => ({
-        name: p.name,
+        name: p.translated?.name ?? p.name ?? '',
         productNumber: p.productNumber,
-        description: stripHtml(p.description),
+        description: stripHtml(p.translated?.description ?? p.description),
         availableStock: p.availableStock ?? p.stock ?? null
       }));
 
@@ -325,7 +327,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         // the same subset of products in both places.
         const displayProducts = products.slice(0, 10);
         const shortlist = displayProducts
-          .map((p: any, idx: number) => `• ${idx + 1}. ${p.name}`)
+          .map((p: any, idx: number) => `${idx + 1}. ${p.name}`)
           .join('\n');
 
         const listStructured = {
@@ -386,7 +388,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
 
       // For multiple matches (e.g. from a non-unique product number search),
       // just list them.
-      const detailLines = products.map((p: any) => `• ${p.name}`);
+      const detailLines = products.map((p: any) => `${p.name}`);
 
       return {
         structuredContent: allStructured,
@@ -429,17 +431,14 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
       const result = await fastifyInstance.shopware.searchProductsByNumber(productNumber, true);
 
       if (!result || (result.total ?? 0) === 0) {
+        const emptyPayload = { productNumber, availableStock: null } as const;
         return {
-          structuredContent: null,
-          content: [
-            {
-              type: 'text',
-              text: `Product with number "${productNumber}" not found.`
-            }
-          ]
+          structuredContent: emptyPayload,
+          content: withStructuredJson(emptyPayload, [
+            { type: "text", text: `Product with number "${productNumber}" not found.` }
+          ])
         } as any;
       }
-
       // Use the first matching product (most searches will be unique)
       const product = result.data[0] as any;
       const availableStock: number | null = product.availableStock ?? product.stock ?? null;
@@ -500,12 +499,18 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
 
       // Early exit if no order found
       if (cleaned.total === 0) {
+        const payload = {
+          orderNumber,
+          statusText: `Order #${orderNumber} not found.`,
+          deliveryEstimate: null
+        } as const;
         return {
-          structuredContent: null,
-          content: [{ type: 'text', text: `Order #${orderNumber} not found.` }]
+          structuredContent: payload,
+          content: withStructuredJson(payload, [
+            { type: "text", text: `Order #${orderNumber} not found.` }
+          ])
         } as any;
       }
-
       const essential = mapEssentials(cleaned.data[0]);
 
       // Helper: convert internal status to a customer-friendly sentence
@@ -620,12 +625,18 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
       const cleaned = stripExtensionsDeep(result);
 
       if (cleaned.total === 0) {
+        const payload = {
+          orderNumber,
+          paymentStatusText: `Order #${orderNumber} not found.`,
+          paymentMethod: null
+        } as const;
         return {
-          structuredContent: null,
-          content: [{ type: 'text', text: `Order #${orderNumber} not found.` }]
+          structuredContent: payload,
+          content: withStructuredJson(payload, [
+            { type: "text", text: `Order #${orderNumber} not found.` }
+          ])
         } as any;
       }
-
       const order = cleaned.data[0] as any;
       const firstTx = order.transactions?.[0] ?? {};
       const paymentStateRaw = firstTx.stateMachineState?.name ?? 'unknown';
@@ -742,7 +753,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
       const payload = { orderNumber, items } as const;
 
       const itemsLines = items
-        .map((it: any) => `• ${it.quantity} × ${it.name ?? 'n/a'} – ${it.totalPrice}`)
+        .map((it: any) => `${it.quantity} × ${it.name ?? 'n/a'} – ${it.totalPrice}`)
         .join('\n');
 
       return {
@@ -765,6 +776,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
       description: 'Fuzzy vector search over product names via LanceDB. Accepts either structured vehicle parameters or a single vehicleText to parse automatically.',
       inputSchema: {
         name: z.string().describe('Partial or full product name'),
+        limit: z.number().min(1).max(100).optional().describe('Maximum results to return'),
         vehicleBrand: z.string().optional().describe('Vehicle brand to filter results'),
         vehicleModel: z.string().optional().describe('Vehicle model to filter results'),
         vehicleVariant: z.string().optional().describe('Vehicle variant to filter results'),
@@ -775,7 +787,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         products: z.array(
           z.object({
             productNumber:   z.string(),
-            productName:     z.string(),
+            name:            z.string(),
             vehicleBrand:    z.string(),
             vehicleModel:    z.string(),
             vehicleVariant:  z.string()
@@ -783,7 +795,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         ).describe('List of matching products with vehicle details')
       }
     },
-    async ({ name, vehicleBrand, vehicleModel, vehicleVariant, vehicleText }: any) => {
+    async ({ name, limit, vehicleBrand, vehicleModel, vehicleVariant, vehicleText }: any) => {
       try {
         // Parse vehicle information from vehicleText if provided
         let parsedBrand = vehicleBrand;
@@ -802,12 +814,15 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
           }
         }
 
-        // Validate that we have at least brand and model
-        if (!parsedBrand || !parsedModel) {
-          throw new Error('Vehicle brand and model are required (either as separate parameters or in vehicleText)');
-        }
+        parsedBrand = parsedBrand?.trim();
+        parsedModel = parsedModel?.trim();
+        parsedVariant = parsedVariant?.trim();
+
+        const brandForEmbedding = parsedBrand ?? '';
+        const modelForEmbedding = parsedModel ?? '';
+        const variantForEmbedding = parsedVariant ?? '';
         // Embed the query using the same format as ingestion
-        const queryEmbedding = await embed(`${name} | ${parsedBrand} | ${parsedModel} | ${parsedVariant || ''}`);
+        const queryEmbedding = await embed(`${name} | ${brandForEmbedding} | ${modelForEmbedding} | ${variantForEmbedding}`);
         // Access the pre-opened LanceDB products table
         const table = fastifyInstance.lance.productsTable;
         // Perform vector search and load metadata columns
@@ -822,29 +837,41 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
           ])
           .toArray();
         // Helper function to normalize text (remove accents and convert to lowercase)
-        const normalizeText = (text: string) => 
-          text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        const normalizeText = (text: string | null | undefined) =>
+          (text ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
-        // Filter by brand and model with accent normalization
-        hits = hits.filter((r: any) =>
-          normalizeText(r.vehicleBrand).includes(normalizeText(parsedBrand)) &&
-          normalizeText(r.vehicleModel).includes(normalizeText(parsedModel))
-        );
-        // If variant provided, further filter by variant with accent normalization
-        if (parsedVariant) {
-          const baseVariantTerms = ['standard', 'base', 'basic', 'base variant'];
-          const isBaseVariantRequest = baseVariantTerms.some(term => 
-            normalizeText(parsedVariant).includes(normalizeText(term))
+        const normalizedBrand = normalizeText(parsedBrand);
+        if (normalizedBrand) {
+          hits = hits.filter((r: any) =>
+            normalizeText(r.vehicleBrand).includes(normalizedBrand)
           );
-          
-          if (isBaseVariantRequest) {
-            // Filter for products with empty/null variants (base variant)
-            hits = hits.filter((r: any) => !r.vehicleVariant || !r.vehicleVariant.trim());
-          } else {
-            // Use normal variant filtering
-            hits = hits.filter((r: any) =>
-              normalizeText(r.vehicleVariant).includes(normalizeText(parsedVariant))
+        }
+
+        const normalizedModel = normalizeText(parsedModel);
+        if (normalizedModel) {
+          hits = hits.filter((r: any) =>
+            normalizeText(r.vehicleModel).includes(normalizedModel)
+          );
+        }
+
+        if (parsedVariant) {
+          const normalizedVariant = normalizeText(parsedVariant);
+          if (normalizedVariant) {
+            const baseVariantTerms = ['standard', 'base', 'basic', 'base variant'];
+            const normalizedVariantTerms = baseVariantTerms.map(term => normalizeText(term));
+            const isBaseVariantRequest = normalizedVariantTerms.some(term =>
+              normalizedVariant.includes(term)
             );
+
+            if (isBaseVariantRequest) {
+              // Filter for products with empty/null variants (base variant)
+              hits = hits.filter((r: any) => !r.vehicleVariant || !r.vehicleVariant.trim());
+            } else {
+              // Use normal variant filtering
+              hits = hits.filter((r: any) =>
+                normalizeText(r.vehicleVariant).includes(normalizedVariant)
+              );
+            }
           }
         }
 
@@ -852,42 +879,50 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         const searchWords = name.toLowerCase().split(/\s+/).filter((word: string) => word.length > 1);
         if (searchWords.length > 0) {
           hits = hits.filter((r: any) => {
-            const productNameLower = r.productName.toLowerCase();
+            const productNameLower = (r.productName ?? '').toLowerCase();
             // Product must contain ALL words from the search query
             return searchWords.every((word: string) => productNameLower.includes(word));
           });
         }
 
-        // Map results
-        const products = hits.map((r: any) => ({
+        const allProducts = hits.map((r: any) => ({
           productNumber:  r.productNumber,
-          productName:    r.productName,
-          vehicleBrand:   r.vehicleBrand,
-          vehicleModel:   r.vehicleModel,
-          vehicleVariant: r.vehicleVariant
+          name:           typeof r.productName === 'string' ? r.productName : '',
+          vehicleBrand:   r.vehicleBrand ?? '',
+          vehicleModel:   r.vehicleModel ?? '',
+          vehicleVariant: r.vehicleVariant ?? ''
         }));
-        const total = products.length;
-        const structured = { total, products };
+        const total = allProducts.length;
 
-        // If no variant specified and we have results, show model/variant selection
-        if (!parsedVariant && total > 0) {
+        let parsedLimit = typeof limit === 'number' ? limit : undefined;
+        if (parsedLimit === undefined && typeof limit === 'string') {
+          const numericLimit = Number.parseInt(limit, 10);
+          if (!Number.isNaN(numericLimit)) {
+            parsedLimit = numericLimit;
+          }
+        }
+        const safeLimit = Math.min(Math.max(parsedLimit ?? 20, 1), 100);
+        const productsForResponse = allProducts.slice(0, safeLimit);
+        const structured = { total, products: productsForResponse };
+
+        if (!parsedVariant && total > 0 && parsedBrand && parsedModel) {
           // First check if we have multiple vehicle models
-          const uniqueModels = [...new Set(products.map((p: any) => p.vehicleModel))]
-            .filter(model => model && typeof model === 'string')
+          const uniqueModels = [...new Set(allProducts.map((p: any) => p.vehicleModel))]
+            .filter(model => model && typeof model === 'string' && model.trim().length > 0)
             .sort(); // Sort alphabetically for better UX
 
           if (uniqueModels.length > 1) {
             // Multiple models found - show models with their variants
             const modelVariantMap = new Map<string, { variants: Set<string>, hasBaseVariant: boolean }>();
-            
-            products.forEach((p: any) => {
+
+            allProducts.forEach((p: any) => {
               const model = p.vehicleModel;
               const variant = p.vehicleVariant && p.vehicleVariant.trim() ? p.vehicleVariant : null;
-              
+
               if (!modelVariantMap.has(model)) {
                 modelVariantMap.set(model, { variants: new Set(), hasBaseVariant: false });
               }
-              
+
               const modelData = modelVariantMap.get(model)!;
               if (variant) {
                 modelData.variants.add(variant);
@@ -895,23 +930,23 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
                 modelData.hasBaseVariant = true;
               }
             });
-            
+
             const modelList = Array.from(modelVariantMap.entries())
               .sort(([a], [b]) => a.localeCompare(b))
               .map(([model, modelData]) => {
-                const variantList = [];
+                const variantList: string[] = [];
                 if (modelData.hasBaseVariant) {
                   variantList.push('base variant');
                 }
                 variantList.push(...Array.from(modelData.variants));
-                
+
                 const variantText = variantList.length > 0 ? ` (${variantList.join(', ')})` : '';
-                return `• ${model}${variantText}`;
+                return ` ${model}${variantText}`;
               })
               .join('\n');
-            
+
             return {
-              structuredContent: { 
+              structuredContent: {
                 total: 0, // No actual products, just model selection
                 products: [] // Empty array to satisfy schema
               },
@@ -919,29 +954,29 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
                 {
                   type: 'text',
                   text: `I found ${name} for these ${parsedBrand} models:\n${modelList}\n\nWhich model and variant is your vehicle?`
-                }
-              ]
+                },
+              ],
             } as any;
           }
-          
+
           if (uniqueModels.length === 1) {
             // Single model - check for variants
-            const variantList = [];
-            const hasBaseVariant = products.some((p: any) => !p.vehicleVariant || !p.vehicleVariant.trim());
-            const uniqueVariants = [...new Set(products.map((p: any) => p.vehicleVariant))]
-              .filter(variant => variant && typeof variant === 'string' && variant.trim()) // Get non-empty variants
+            const variantList: string[] = [];
+            const hasBaseVariant = allProducts.some((p: any) => !p.vehicleVariant || !p.vehicleVariant.trim());
+            const uniqueVariants = ([...new Set(allProducts.map((p: any) => p.vehicleVariant))] as string[])
+              .filter(variant => variant && typeof variant === 'string' && variant.trim())
               .sort(); // Sort alphabetically for better UX
-            
+
             if (hasBaseVariant) {
               variantList.push('base variant');
             }
             variantList.push(...uniqueVariants);
-            
+
             if (variantList.length > 1) {
-              const variantDisplay = variantList.map(variant => `• ${variant}`).join('\n');
-              
+              const variantDisplay = variantList.map(variant => ` ${variant}`).join('\n');
+
               return {
-                structuredContent: { 
+                structuredContent: {
                   total: 0, // No actual products, just variant selection
                   products: [] // Empty array to satisfy schema
                 },
@@ -949,8 +984,8 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
                   {
                     type: 'text',
                     text: `I found ${name} for these ${parsedBrand} ${parsedModel} variants:\n${variantDisplay}\n\nCan you specify which variant your vehicle is?`
-                  }
-                ]
+                  },
+                ],
               } as any;
             }
           }
@@ -959,22 +994,22 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         if (total > 1) {
           // Group products by identical display name and vehicle info
           const productGroups = new Map<string, string[]>();
-          
-          products.forEach((p: any) => {
-            const cleanName = p.productName.replace(/^JAEGER automotive\s*/i, '').trim();
+
+          productsForResponse.forEach((p: any) => {
+            const cleanName = p.name.replace(/^JAEGER automotive\s*/i, '').trim();
             const vehicleInfo = `${p.vehicleBrand} ${p.vehicleModel} ${p.vehicleVariant}`.trim();
             const displayKey = `${cleanName} for ${vehicleInfo}`;
-            
+
             if (!productGroups.has(displayKey)) {
               productGroups.set(displayKey, []);
             }
             productGroups.get(displayKey)!.push(p.productNumber);
           });
-          
+
           const variantLines = Array.from(productGroups.entries())
             .map(([displayName, productNumbers]) => {
               const numbersList = productNumbers.join(', ');
-              return `• ${displayName} (${numbersList})`;
+              return ` ${displayName} (${numbersList})`;
             })
             .join('\n');
           return {
@@ -983,23 +1018,23 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
               {
                 type: 'text',
                 text: `Found ${total} items for '${name}':\n${variantLines}`
-              }
-            ]
+              },
+            ],
           } as any;
         }
 
         if (total === 1) {
-          const p = products[0];
-          const cleanName = p.productName.replace(/^JAEGER automotive\s*/i, '').trim();
+          const p = allProducts[0];
+          const cleanName = p.name.replace(/^JAEGER automotive\s*/i, '').trim();
           const vehicleInfo = `${p.vehicleBrand} ${p.vehicleModel} ${p.vehicleVariant}`.trim();
           return {
             structuredContent: structured,
             content: [
               {
                 type: 'text',
-                text: `Found one product: ${cleanName} for ${vehicleInfo} (${p.productNumber})`
-              }
-            ]
+                text: `Found one product: ${cleanName} for ${vehicleInfo} (${p.productNumber})`,
+              },
+            ],
           } as any;
         }
 
@@ -1009,9 +1044,9 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
           content: [
             {
               type: 'text',
-              text: `No products found for "${name}".`
-            }
-          ]
+              text: `No products found for "${name}".`,
+            },
+          ],
         } as any;
       } catch (err: any) {
         fastifyInstance.log.error(err);
@@ -1019,8 +1054,8 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         return {
           structuredContent: empty,
           content: [
-            { type: 'text', text: `Vector search failed: ${err.message}` }
-          ]
+            { type: 'text', text: `Vector search failed: ${err.message}` },
+          ],
         } as any;
       }
     }
@@ -1033,15 +1068,15 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
    * Returns customer details including contact information and addresses.
    *
    * Input  – `customerInputShape` (zod)
-   *   • email?:          string  – customer email address
-   *   • customerNumber?: string  – customer number
-   *   • firstName?:      string  – first name (partial match)
-   *   • lastName?:       string  – last name (partial match)
-   *   • phone?:          string  – phone number
+   *   email?:          string  – customer email address
+   *   customerNumber?: string  – customer number
+   *   firstName?:      string  – first name (partial match)
+   *   lastName?:       string  – last name (partial match)
+   *   phone?:          string  – phone number
    *
    * Output – `customerOutputShape` (zod)
-   *   • total:     number     – total number of matching customers
-   *   • customers: Customer[] – customer details with addresses
+   *   total:     number     – total number of matching customers
+   *   customers: Customer[] – customer details with addresses
    */
   const customerInputShape = {
     email: z.string().optional(),
@@ -1209,7 +1244,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
       // Multiple customers found
       const customerList = customers.slice(0, 10).map((c: any) => {
         const fullName = [c.title, c.firstName, c.lastName].filter(Boolean).join(' ');
-        return `• ${fullName} (${c.email}) - Customer #${c.customerNumber ?? 'n/a'}`;
+        return `${fullName} (${c.email}) - Customer #${c.customerNumber ?? 'n/a'}`;
       }).join('\n');
 
       const displayStructured = { total, customers: customers.slice(0, 10) } as const;
@@ -1233,9 +1268,9 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
    * Retrieve all orders for a specific customer, either by customer ID or email.
    *
    * Input  – `customerOrdersInputShape` (zod)
-   *   • customerId?: string – customer ID from search-customer
-   *   • email?:      string – customer email address
-   *   • limit?:      number – max orders to return (defaults to 10)
+   *   customerId?: string – customer ID from search-customer
+   *   email?:      string – customer email address
+   *   limit?:      number – max orders to return (defaults to 10)
    *
    * Output – Same as search-orders output
    */
@@ -1336,7 +1371,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         : essentials.orders[0]?.customer?.email || 'Customer';
 
       const orderList = essentials.orders.map((o: any) => 
-        `• Order #${o.customer.orderNumber} - ${o.customer.orderDateTime} - €${o.totals.amountTotal} - ${o.status.overall}`
+        `Order #${o.customer.orderNumber} - ${o.customer.orderDateTime} - €${o.totals.amountTotal} - ${o.status.overall}`
       ).join('\n');
 
       return {
@@ -1384,3 +1419,5 @@ const registerMcp: FastifyPluginAsync = fp(async (fastify) => {
 });
 
 export { registerMcp };
+
+

@@ -1,10 +1,22 @@
-import fs from 'fs';
 import 'dotenv/config';
+
+import fs from 'fs';
 import path from 'path';
-import { parse } from 'csv-parse';
-import OpenAI from 'openai';
-import * as lancedb from '@lancedb/lancedb';
+
 import * as arrow from 'apache-arrow';
+import { parse } from 'csv-parse';
+import { connect, type Connection, type Table } from '@lancedb/lancedb';
+import OpenAI from 'openai';
+
+type ProductMetadata = {
+  productNumber: string;
+  productName: string;
+  vehicleBrand: string;
+  vehicleModel: string;
+  vehicleVariant: string;
+};
+type ProductRecord = ProductMetadata & { vector: number[] };
+type EmbeddingResponse = Awaited<ReturnType<OpenAI['embeddings']['create']>>;
 
 async function main() {
   const csvPath = path.resolve(__dirname, '../data/weltmannproducts.csv');
@@ -17,12 +29,12 @@ async function main() {
   const model = 'text-embedding-3-large';
   const batchSize = 50; // Reduced batch size for better memory management
   const dbPath = path.resolve(__dirname, '../lancedb');
-  const db = await (lancedb as any).connect(dbPath);
+  const db: Connection = await connect(dbPath);
   
   let schema: arrow.Schema | null = null;
-  let table: any = null;
+  let table: Table | null = null;
   let totalProcessed = 0;
-  let currentBatch: Array<{productNumber: string; productName: string; vehicleBrand: string; vehicleModel: string; vehicleVariant: string;}> = [];
+  let currentBatch: ProductMetadata[] = [];
   let isFirstBatch = true;
 
   console.log(`Starting ingestion with batch size: ${batchSize}`);
@@ -89,51 +101,54 @@ function logMemoryUsage(stage: string) {
   });
 }
 
+
 async function processBatch(
-  batch: Array<{productNumber: string; productName: string; vehicleBrand: string; vehicleModel: string; vehicleVariant: string;}>,
+  batch: ProductMetadata[],
   openai: OpenAI,
   model: string,
-  db: any,
+  db: Connection,
   schema: arrow.Schema | null,
-  table: any,
+  table: Table | null,
   offset: number,
   isFirstBatch: boolean
-): Promise<{schema: arrow.Schema | null; table: any}> {
+): Promise<{ schema: arrow.Schema; table: Table }> {
   console.log(`Processing batch: rows ${offset + 1}-${offset + batch.length}`);
-  
-  const inputs = batch.map(r =>
-    `${r.productName} | ${r.vehicleBrand} | ${r.vehicleModel} | ${r.vehicleVariant}`
+
+  const inputs = batch.map(record =>
+    `${record.productName} | ${record.vehicleBrand} | ${record.vehicleModel} | ${record.vehicleVariant}`
   );
-  
-  let resp;
+
+  let response: EmbeddingResponse | null = null;
   let retries = 3;
+
   while (retries > 0) {
     try {
-      resp = await openai.embeddings.create({ model, input: inputs });
+      response = await openai.embeddings.create({ model, input: inputs });
       break;
     } catch (error) {
-      retries--;
+      retries -= 1;
       console.warn(`Embedding API error (${retries} retries left):`, error);
-      if (retries === 0) throw error;
+      if (retries === 0) {
+        throw error;
+      }
       await new Promise(resolve => setTimeout(resolve, 1000 * (4 - retries))); // Exponential backoff
     }
   }
-  
-  if (!resp) {
+
+  if (!response) {
     throw new Error('Failed to get embeddings response after retries');
   }
-  
-  const records = resp.data.map((item, idx) => ({
+
+  const records: ProductRecord[] = response.data.map((item, idx) => ({
     productNumber: batch[idx].productNumber,
     productName: batch[idx].productName,
     vehicleBrand: batch[idx].vehicleBrand,
     vehicleModel: batch[idx].vehicleModel,
     vehicleVariant: batch[idx].vehicleVariant,
-    vector: item.embedding as number[]
+    vector: item.embedding
   }));
 
   if (isFirstBatch) {
-    // Create table with schema on first batch
     const vectorDim = records[0].vector.length;
     const newSchema = new arrow.Schema([
       new arrow.Field('productNumber', new arrow.Utf8(), false),
@@ -145,24 +160,28 @@ async function processBatch(
         'vector',
         new arrow.FixedSizeList(
           vectorDim,
-          new arrow.Field('item', new arrow.Float32(), false),
+          new arrow.Field('item', new arrow.Float32(), false)
         ),
-        false,
-      ),
+        false
+      )
     ]);
-    
+
     const newTable = await db.createTable('products', records, { schema: newSchema, mode: 'overwrite' });
     console.log(`Created table with ${records.length} initial records`);
-    
+
     return { schema: newSchema, table: newTable };
-  } else {
-    // Add to existing table
-    await table.add(records);
-    console.log(`Added ${records.length} records to table`);
-    
-    return { schema, table };
   }
+
+  if (!schema || !table) {
+    throw new Error('Existing LanceDB schema and table are required after the first batch');
+  }
+
+  await table.add(records);
+  console.log(`Added ${records.length} records to table`);
+
+  return { schema, table };
 }
+
 
 main().catch(err => {
   console.error(err);

@@ -8,3 +8,4 @@ dist/
 # PM2 logs
 logs/*.log
 .pm2/
+PROMPT.md
