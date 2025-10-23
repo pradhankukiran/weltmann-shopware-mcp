@@ -18,6 +18,9 @@ async function buildServer() {
   await app.register((await import('./routes/products')).default);
   await app.register((await import('./routes/orders')).default);
 
+  // CSV plugin (product catalog)
+  await app.register((await import('./plugins/csv')).registerCSV);
+
   // LanceDB plugin (vector store)
   await app.register((await import('./plugins/lancedb')).registerLanceDB);
 

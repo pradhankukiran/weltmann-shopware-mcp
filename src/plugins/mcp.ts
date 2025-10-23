@@ -3,7 +3,7 @@ import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { embed } from '../utils/embed';
+import type { Product } from './csv';
 
 // Reuse simple HTML stripping logic from routes
 const stripHtml = (html: string | null | undefined) => {
@@ -770,10 +770,10 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
 
   // -------------------- Product name search tool --------------------
   serverInstance.registerTool(
-    'search-product-vector',
+    'search-product-catalog',
     {
-      title: 'Search product by name (vector)',
-      description: 'Fuzzy vector search over product names via LanceDB. Accepts either structured vehicle parameters or a single vehicleText to parse automatically.',
+      title: 'Search product by name',
+      description: 'Search over product names from CSV catalog. Accepts either structured vehicle parameters or a single vehicleText to parse automatically.',
       inputSchema: {
         name: z.string().describe('Partial or full product name'),
         limit: z.number().min(1).max(100).optional().describe('Maximum results to return'),
@@ -818,42 +818,38 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         parsedModel = parsedModel?.trim();
         parsedVariant = parsedVariant?.trim();
 
-        const brandForEmbedding = parsedBrand ?? '';
-        const modelForEmbedding = parsedModel ?? '';
-        const variantForEmbedding = parsedVariant ?? '';
-        // Embed the query using the same format as ingestion
-        const queryEmbedding = await embed(`${name} | ${brandForEmbedding} | ${modelForEmbedding} | ${variantForEmbedding}`);
-        // Access the pre-opened LanceDB products table
-        const table = fastifyInstance.lance.productsTable;
-        // Perform vector search and load metadata columns
-        let hits = await table.search(queryEmbedding)
-          .limit(100)
-          .select([
-            'productNumber',
-            'productName',
-            'vehicleBrand',
-            'vehicleModel',
-            'vehicleVariant'
-          ])
-          .toArray();
         // Helper function to normalize text (remove accents and convert to lowercase)
         const normalizeText = (text: string | null | undefined) =>
           (text ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+        // Get all products from CSV
+        const allProductsCSV = fastifyInstance.products;
+
+        // Filter products by name
+        const searchWords = name.toLowerCase().split(/\s+/).filter((word: string) => word.length > 1);
+        let hits = allProductsCSV.filter((p: Product) => {
+          const productNameLower = normalizeText(p.productName);
+          // Product must contain ALL words from the search query
+          return searchWords.every((word: string) => productNameLower.includes(word.toLowerCase()));
+        });
+
+        // Filter by brand
         const normalizedBrand = normalizeText(parsedBrand);
         if (normalizedBrand) {
-          hits = hits.filter((r: any) =>
-            normalizeText(r.vehicleBrand).includes(normalizedBrand)
+          hits = hits.filter((p: Product) =>
+            normalizeText(p.vehicleBrand).includes(normalizedBrand)
           );
         }
 
+        // Filter by model
         const normalizedModel = normalizeText(parsedModel);
         if (normalizedModel) {
-          hits = hits.filter((r: any) =>
-            normalizeText(r.vehicleModel).includes(normalizedModel)
+          hits = hits.filter((p: Product) =>
+            normalizeText(p.vehicleModel).includes(normalizedModel)
           );
         }
 
+        // Filter by variant
         if (parsedVariant) {
           const normalizedVariant = normalizeText(parsedVariant);
           if (normalizedVariant) {
@@ -865,32 +861,22 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
 
             if (isBaseVariantRequest) {
               // Filter for products with empty/null variants (base variant)
-              hits = hits.filter((r: any) => !r.vehicleVariant || !r.vehicleVariant.trim());
+              hits = hits.filter((p: Product) => !p.vehicleVariant || !p.vehicleVariant.trim());
             } else {
               // Use normal variant filtering
-              hits = hits.filter((r: any) =>
-                normalizeText(r.vehicleVariant).includes(normalizedVariant)
+              hits = hits.filter((p: Product) =>
+                normalizeText(p.vehicleVariant).includes(normalizedVariant)
               );
             }
           }
         }
 
-        // Add simple text filtering: if user searches for specific words, filter by those words
-        const searchWords = name.toLowerCase().split(/\s+/).filter((word: string) => word.length > 1);
-        if (searchWords.length > 0) {
-          hits = hits.filter((r: any) => {
-            const productNameLower = (r.productName ?? '').toLowerCase();
-            // Product must contain ALL words from the search query
-            return searchWords.every((word: string) => productNameLower.includes(word));
-          });
-        }
-
-        const allProducts = hits.map((r: any) => ({
-          productNumber:  r.productNumber,
-          name:           typeof r.productName === 'string' ? r.productName : '',
-          vehicleBrand:   r.vehicleBrand ?? '',
-          vehicleModel:   r.vehicleModel ?? '',
-          vehicleVariant: r.vehicleVariant ?? ''
+        const allProducts = hits.map((p: Product) => ({
+          productNumber:  p.productNumber,
+          name:           p.productName,
+          vehicleBrand:   p.vehicleBrand ?? '',
+          vehicleModel:   p.vehicleModel ?? '',
+          vehicleVariant: p.vehicleVariant ?? ''
         }));
         const total = allProducts.length;
 
@@ -1054,7 +1040,7 @@ const registerTools = (fastifyInstance: any, serverInstance: McpServer) => {
         return {
           structuredContent: empty,
           content: [
-            { type: 'text', text: `Vector search failed: ${err.message}` },
+            { type: 'text', text: `Product search failed: ${err.message}` },
           ],
         } as any;
       }

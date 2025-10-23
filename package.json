@@ -1,5 +1,5 @@
 {
-  "name": "shopware-mcp",
+  "name": "weltmann-shopware-mcp",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -36,12 +36,14 @@
     "fastify-plugin": "^4.4.0",
     "mcp-remote": "^0.1.16",
     "openai": "^5.10.2",
+    "papaparse": "^5.5.3",
     "pino": "^8.17.0",
     "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/jest": "^29.5.3",
     "@types/node": "^20.19.9",
+    "@types/papaparse": "^5.3.16",
     "@typescript-eslint/eslint-plugin": "^8.44.0",
     "eslint": "^8.48.0",
     "eslint-config-prettier": "^9.0.0",

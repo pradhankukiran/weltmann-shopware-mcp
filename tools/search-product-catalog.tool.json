@@ -1,6 +1,6 @@
 {
-  "name": "search-product-vector",
-  "description": "Fuzzy vector search over product names via LanceDB",
+  "name": "search-product-catalog",
+  "description": "Search over product names from CSV catalog",
   "endpoint": {
     "method": "POST",
     "path": "/mcp",
@@ -9,7 +9,7 @@
     },
     "body": {
       "jsonrpc": "2.0",
-      "method": "search-product-vector",
+      "method": "search-product-catalog",
       "params": {
         "name": "{{name}}",
         "limit": "{{limit}}",
