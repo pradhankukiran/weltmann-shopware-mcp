@@ -1,9 +1,10 @@
 import axios, {
   AxiosInstance,
   AxiosRequestConfig,
-  AxiosResponse,
-  AxiosRequestHeaders
+  AxiosResponse
 } from 'axios';
+import { getConfig } from '../config';
+import { ShopwareApiError } from '../utils/errors';
 
 export interface ShopwareAdminClientOptions {
   baseUrl: string; // e.g. https://example.com/api
@@ -15,7 +16,6 @@ interface OAuthTokenResponse {
   access_token: string;
   expires_in: number; // seconds
   token_type: 'Bearer';
-  // refresh_token omitted for integrations
 }
 
 export class ShopwareAdminClient {
@@ -24,7 +24,16 @@ export class ShopwareAdminClient {
   private token: string | null = null;
   private tokenExpiresAt = 0; // epoch ms
 
+  // Token refresh mutex to prevent race conditions
+  private tokenRefreshPromise: Promise<string> | null = null;
+  private readonly tokenRefreshBufferMs = 5 * 60 * 1000; // 5 minutes before expiry
+
+  // Retry configuration
+  private readonly maxRetries = 3;
+  private readonly baseDelayMs = 1000;
+
   constructor(options: ShopwareAdminClientOptions) {
+    const config = getConfig();
     this.opts = options;
 
     this.axios = axios.create({
@@ -32,20 +41,77 @@ export class ShopwareAdminClient {
       headers: {
         'Content-Type': 'application/json'
       },
-      timeout: 10_000
+      timeout: config.SHOPWARE_API_TIMEOUT
     });
 
-    this.axios.interceptors.request.use(async (config) => {
+    this.axios.interceptors.request.use(async (cfg) => {
       const token = await this.getValidToken();
-      const cfg: any = config;
       cfg.headers = cfg.headers || {};
       cfg.headers.Authorization = `Bearer ${token}`;
       return cfg;
     });
   }
 
+  /**
+   * Check if an error is retryable (5xx, 401, network errors)
+   */
+  private isRetryableError(error: unknown): boolean {
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      // Retry on network errors and timeouts
+      if (!status) {
+        return error.code === 'ECONNRESET' ||
+               error.code === 'ETIMEDOUT' ||
+               error.code === 'ECONNREFUSED';
+      }
+      // Handle 401 by invalidating token and retrying
+      if (status === 401) {
+        this.invalidateToken();
+        return true;
+      }
+      // Retry on server errors (5xx)
+      return status >= 500;
+    }
+    return false;
+  }
+
+  /**
+   * Execute an operation with retry logic and exponential backoff
+   */
+  private async withRetry<T>(
+    operation: () => Promise<T>,
+    context: string
+  ): Promise<T> {
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt < this.maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error as Error;
+
+        if (!this.isRetryableError(error)) {
+          throw error;
+        }
+
+        // Don't sleep after the last attempt
+        if (attempt < this.maxRetries - 1) {
+          const delay = this.baseDelayMs * Math.pow(2, attempt);
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ShopwareAdminClient] ${context} failed (attempt ${attempt + 1}/${this.maxRetries}), retrying in ${delay}ms`
+          );
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
   private async fetchToken(): Promise<OAuthTokenResponse> {
     const url = '/oauth/token';
+    const config = getConfig();
 
     const payload = {
       grant_type: 'client_credentials',
@@ -53,25 +119,95 @@ export class ShopwareAdminClient {
       client_secret: this.opts.secretAccessKey
     } as const;
 
-    const { data } = await axios.post<OAuthTokenResponse>(`${this.opts.baseUrl}${url}`, payload, {
-      headers: {
-        'Content-Type': 'application/json'
+    try {
+      const { data } = await axios.post<OAuthTokenResponse>(
+        `${this.opts.baseUrl}${url}`,
+        payload,
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: config.SHOPWARE_API_TIMEOUT
+        }
+      );
+      return data;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const statusCode = error.response?.status;
+        const message =
+          statusCode === 401
+            ? 'Invalid Shopware credentials'
+            : `Token fetch failed: ${error.message}`;
+        throw new ShopwareApiError(message, url, statusCode, error);
       }
-    });
-
-    return data;
+      throw new ShopwareApiError(
+        `Token fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+        url
+      );
+    }
   }
 
   private async getValidToken(): Promise<string> {
     const now = Date.now();
-    if (this.token && now < this.tokenExpiresAt - 30_000) {
+    // Return cached token if still valid (with buffer time)
+    if (this.token && now < this.tokenExpiresAt - this.tokenRefreshBufferMs) {
       return this.token;
     }
 
+    // If a refresh is already in progress, wait for it instead of starting another
+    if (this.tokenRefreshPromise) {
+      return this.tokenRefreshPromise;
+    }
+
+    // Start token refresh and store the promise for concurrent callers
+    this.tokenRefreshPromise = this.refreshToken();
+    try {
+      return await this.tokenRefreshPromise;
+    } finally {
+      this.tokenRefreshPromise = null;
+    }
+  }
+
+  private async refreshToken(): Promise<string> {
     const tokenResp = await this.fetchToken();
     this.token = tokenResp.access_token;
-    this.tokenExpiresAt = now + tokenResp.expires_in * 1000;
+    this.tokenExpiresAt = Date.now() + tokenResp.expires_in * 1000;
     return this.token;
+  }
+
+  /**
+   * Invalidate the current token, forcing a refresh on next request
+   */
+  private invalidateToken(): void {
+    this.token = null;
+    this.tokenExpiresAt = 0;
+  }
+
+  /**
+   * Safe POST helper that wraps errors in ShopwareApiError and includes retry logic
+   */
+  private async safePost<T>(endpoint: string, payload: unknown): Promise<T> {
+    return this.withRetry(async () => {
+      try {
+        const { data } = await this.axios.post<T>(endpoint, payload);
+        return data;
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          const statusCode = error.response?.status;
+          const apiError = (error.response?.data as { errors?: Array<{ detail?: string }> })
+            ?.errors?.[0]?.detail;
+          const message = apiError || error.message;
+          throw new ShopwareApiError(
+            `API request to ${endpoint} failed: ${message}`,
+            endpoint,
+            statusCode,
+            error
+          );
+        }
+        throw new ShopwareApiError(
+          `Request to ${endpoint} failed: ${error instanceof Error ? error.message : String(error)}`,
+          endpoint
+        );
+      }
+    }, `POST ${endpoint}`);
   }
 
   // Generic request helper
@@ -84,11 +220,19 @@ export class ShopwareAdminClient {
     return this.axios.get<T>(url, config);
   }
 
-  async post<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+  async post<T = unknown>(
+    url: string,
+    data?: unknown,
+    config?: AxiosRequestConfig
+  ): Promise<AxiosResponse<T>> {
     return this.axios.post<T>(url, data, config);
   }
 
-  async patch<T = unknown>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+  async patch<T = unknown>(
+    url: string,
+    data?: unknown,
+    config?: AxiosRequestConfig
+  ): Promise<AxiosResponse<T>> {
     return this.axios.patch<T>(url, data, config);
   }
 
@@ -117,57 +261,48 @@ export class ShopwareAdminClient {
       }
     };
 
-    const { data } = await this.post<any>('/search/order', criteria);
-    return data;
+    return this.safePost<{ total: number; data: unknown[] }>('/search/order', criteria);
   }
 
   /**
-   * Generic order search helper. Accepts a full Shopware criteria object and returns the raw response.
-   * Caller can specify paging, filters, associations, etc.
+   * Generic order search helper. Accepts a full Shopware criteria object.
    */
-  async searchOrders(criteria: Record<string, any>) {
-    const { data } = await this.post<any>('/search/order', criteria);
-    return data;
+  async searchOrders(criteria: Record<string, unknown>) {
+    return this.safePost<{ total: number; data: unknown[] }>('/search/order', criteria);
   }
 
   /**
-   * Convenience helper to look up an order (or orders) by exact orderNumber.
-   * Mirrors the product „by number" helper for symmetry.
+   * Look up an order by exact orderNumber.
    */
   async searchOrdersByNumber(orderNumber: string, includeAllFields = false) {
-    const payload: any = {
-      filter: [
-        { type: 'equals', field: 'orderNumber', value: orderNumber }
-      ]
+    const payload: Record<string, unknown> = {
+      filter: [{ type: 'equals', field: 'orderNumber', value: orderNumber }]
     };
 
     if (!includeAllFields) {
       payload.includes = {
-        order: [
-          'id',
-          'orderNumber',
-          'orderDateTime',
-          'amountTotal',
-          'stateId'
-        ]
+        order: ['id', 'orderNumber', 'orderDateTime', 'amountTotal', 'stateId']
       };
     }
 
-    const { data } = await this.post<any>('/search/order', payload);
-    return data;
+    return this.safePost<{ total: number; data: unknown[] }>('/search/order', payload);
   }
 
+  /**
+   * Search products by term with pagination support.
+   * Has safety limits to prevent infinite loops.
+   */
   async searchProducts(term: string, limit?: number, exact = true, includeAllFields = false) {
+    const config = getConfig();
+
     // If limit is provided, simple one-shot request
     if (typeof limit === 'number') {
-      const payload: any = {
+      const payload: Record<string, unknown> = {
         term,
         limit,
         ...(exact
           ? {
-              filter: [
-                { type: 'contains', field: 'name', value: term }
-              ],
+              filter: [{ type: 'contains', field: 'name', value: term }],
               term: undefined
             }
           : {})
@@ -179,29 +314,27 @@ export class ShopwareAdminClient {
         };
       }
 
-      const { data } = await this.post<any>('/search/product', payload);
-      return data;
+      return this.safePost<{ total: number; data: unknown[] }>('/search/product', payload);
     }
 
-    // Otherwise fetch all pages
-    const pageSize = 250;
-    let page = 1;
-    let all: any[] = [];
-    let total = 0;
+    // Otherwise fetch all pages with safety limits
+    const pageSize = config.MAX_PAGE_SIZE;
+    const maxIterations = config.MAX_PAGINATION_ITERATIONS;
+    const maxTotalItems = config.MAX_TOTAL_ITEMS;
 
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const payload: any = {
+    let page = 1;
+    let all: unknown[] = [];
+    let total = 0;
+    let iterations = 0;
+
+    while (iterations < maxIterations) {
+      iterations += 1;
+
+      const payload: Record<string, unknown> = {
         term: exact ? undefined : term,
         limit: pageSize,
         page,
-        ...(exact
-          ? {
-              filter: [
-                { type: 'contains', field: 'name', value: term }
-              ]
-            }
-          : {})
+        ...(exact ? { filter: [{ type: 'contains', field: 'name', value: term }] } : {})
       };
 
       if (!includeAllFields) {
@@ -210,28 +343,41 @@ export class ShopwareAdminClient {
         };
       }
 
-      const { data } = await this.post<any>('/search/product', payload);
+      const data = await this.safePost<{ total?: number; data?: unknown[] }>(
+        '/search/product',
+        payload
+      );
       const items = data.data ?? [];
       total = data.total ?? items.length;
       all = all.concat(items);
 
+      // Exit conditions
       if (all.length >= total || items.length === 0) {
+        return { total, data: all };
+      }
+
+      // Safety: prevent accumulating too many items
+      if (all.length >= maxTotalItems) {
+        // eslint-disable-next-line no-console
+        console.warn(`Pagination stopped: reached ${maxTotalItems} items limit`);
         return { total, data: all };
       }
 
       page += 1;
     }
+
+    // If we hit max iterations, return what we have
+    // eslint-disable-next-line no-console
+    console.warn(`Pagination stopped: reached ${maxIterations} page limit`);
+    return { total, data: all };
   }
 
   /**
    * Find product(s) by exact productNumber (SKU).
-   * Shopware guarantees uniqueness for productNumber but we return an array for symmetry.
    */
   async searchProductsByNumber(productNumber: string, includeAllFields = false) {
-    const payload: any = {
-      filter: [
-        { type: 'equals', field: 'productNumber', value: productNumber }
-      ]
+    const payload: Record<string, unknown> = {
+      filter: [{ type: 'equals', field: 'productNumber', value: productNumber }]
     };
 
     if (!includeAllFields) {
@@ -240,40 +386,27 @@ export class ShopwareAdminClient {
       };
     }
 
-    const { data } = await this.post<any>('/search/product', payload);
-    return data;
+    return this.safePost<{ total: number; data: unknown[] }>('/search/product', payload);
   }
 
   /**
-   * Generic customer search helper. Accepts a full Shopware criteria object and returns the raw response.
-   * Caller can specify paging, filters, associations, etc.
+   * Generic customer search helper.
    */
-  async searchCustomers(criteria: Record<string, any>) {
-    const { data } = await this.post<any>('/search/customer', criteria);
-    return data;
+  async searchCustomers(criteria: Record<string, unknown>) {
+    return this.safePost<{ total: number; data: unknown[] }>('/search/customer', criteria);
   }
 
   /**
-   * Convenience helper to look up customers by email address.
+   * Look up customers by email address.
    */
   async searchCustomersByEmail(email: string, includeAllFields = false) {
-    const payload: any = {
-      filter: [
-        { type: 'equals', field: 'email', value: email }
-      ]
+    const payload: Record<string, unknown> = {
+      filter: [{ type: 'equals', field: 'email', value: email }]
     };
 
     if (!includeAllFields) {
       payload.includes = {
-        customer: [
-          'id',
-          'customerNumber',
-          'email',
-          'firstName',
-          'lastName',
-          'title',
-          'active'
-        ]
+        customer: ['id', 'customerNumber', 'email', 'firstName', 'lastName', 'title', 'active']
       };
     } else {
       payload.associations = {
@@ -289,32 +422,21 @@ export class ShopwareAdminClient {
       };
     }
 
-    const { data } = await this.post<any>('/search/customer', payload);
-    return data;
+    return this.safePost<{ total: number; data: unknown[] }>('/search/customer', payload);
   }
 
   /**
    * Find all orders for a specific customer by customer ID.
    */
   async searchOrdersByCustomer(customerId: string, includeAllFields = false) {
-    const payload: any = {
-      filter: [
-        { type: 'equals', field: 'orderCustomer.customerId', value: customerId }
-      ],
-      sort: [
-        { field: 'orderDateTime', order: 'DESC' }
-      ]
+    const payload: Record<string, unknown> = {
+      filter: [{ type: 'equals', field: 'orderCustomer.customerId', value: customerId }],
+      sort: [{ field: 'orderDateTime', order: 'DESC' }]
     };
 
     if (!includeAllFields) {
       payload.includes = {
-        order: [
-          'id',
-          'orderNumber',
-          'orderDateTime',
-          'amountTotal',
-          'stateId'
-        ]
+        order: ['id', 'orderNumber', 'orderDateTime', 'amountTotal', 'stateId']
       };
     } else {
       payload.associations = {
@@ -342,7 +464,6 @@ export class ShopwareAdminClient {
       };
     }
 
-    const { data } = await this.post<any>('/search/order', payload);
-    return data;
+    return this.safePost<{ total: number; data: unknown[] }>('/search/order', payload);
   }
-} 
+}

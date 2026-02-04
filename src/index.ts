@@ -3,47 +3,68 @@ import * as os from 'os';
 import axios from 'axios';
 import fastify from 'fastify';
 
-import { loadConfig } from './config';
+import { loadConfig, getConfig } from './config';
 import { registerSwagger } from './plugins/swagger';
+import { escapeHtml, maskSensitiveUrl } from './utils';
+
+// Handle unhandled rejections and exceptions
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  process.exit(1);
+});
 
 async function buildServer() {
   const config = loadConfig();
   const app = fastify({ logger: true });
 
-  // Register plugins
-  await app.register(registerSwagger);
-  await app.register((await import('./plugins/shopware')).registerShopware);
+  try {
+    // Register plugins
+    await app.register(registerSwagger);
+    await app.register((await import('./plugins/shopware')).registerShopware);
 
-  // Register routes
-  await app.register((await import('./routes/products')).default);
-  await app.register((await import('./routes/orders')).default);
+    // Register routes
+    await app.register((await import('./routes/products')).default);
+    await app.register((await import('./routes/orders')).default);
 
-  // CSV plugin (product catalog)
-  await app.register((await import('./plugins/csv')).registerCSV);
+    // CORS plugin (optional, based on config)
+    if (config.CORS_ORIGIN) {
+      await app.register(import('@fastify/cors'), {
+        origin: config.CORS_ORIGIN === '*' ? true : config.CORS_ORIGIN,
+        methods: ['GET', 'POST', 'OPTIONS']
+      });
+    }
 
-  // LanceDB plugin (vector store)
-  await app.register((await import('./plugins/lancedb')).registerLanceDB);
+    // CSV plugin (product catalog)
+    await app.register((await import('./plugins/csv')).registerCSV);
 
-  // MCP plugin (streamable HTTP)
-  await app.register((await import('./plugins/mcp')).registerMcp);
+    // Security plugin (rate limiting & optional API key auth)
+    await app.register((await import('./plugins/security')).registerSecurity, {
+      rateLimit: {
+        windowMs: config.RATE_LIMIT_WINDOW_MS,
+        maxRequests: config.RATE_LIMIT_MAX_REQUESTS
+      },
+      apiKey: config.MCP_API_KEY
+    });
+
+    // MCP plugin (streamable HTTP)
+    await app.register((await import('./plugins/mcp')).registerMcp);
+  } catch (error) {
+    app.log.error({ error }, 'Failed to register plugins');
+    throw error;
+  }
 
   // Dynamic favicon route
   app.get('/favicon.ico', async (request, reply) => {
+    const config = getConfig();
+
     // Check service statuses for favicon color
-    let lancedbStatus = 'error';
     let shopwareStatus = 'error';
     let mcpStatus = 'error';
-
-    // Test LanceDB connection
-    try {
-      const table = app.lance?.productsTable;
-      if (table) {
-        await table.countRows();
-        lancedbStatus = 'connected';
-      }
-    } catch (error) {
-      lancedbStatus = 'error';
-    }
 
     // Test Shopware connection
     try {
@@ -52,24 +73,27 @@ async function buildServer() {
         shopwareStatus = 'connected';
       }
     } catch (error) {
+      app.log.warn({ error }, 'Favicon Shopware check failed');
       shopwareStatus = 'error';
     }
 
     // Test MCP tools (lightweight test)
     try {
       if (app.shopware) {
-        // Test the same functionality that MCP tools rely on
-        await app.shopware.searchProductsByNumber('JA-000001', true);
+        await app.shopware.searchProductsByNumber(config.HEALTH_CHECK_PRODUCT_NUMBER, true);
         mcpStatus = 'connected';
       }
     } catch (error) {
+      app.log.warn({ error }, 'Favicon MCP check failed');
       mcpStatus = 'error';
     }
 
     // Determine favicon color based on all service statuses
-    const connectedServices = [lancedbStatus, shopwareStatus, mcpStatus].filter(s => s === 'connected').length;
-    const totalServices = 3;
-    
+    const connectedServices = [shopwareStatus, mcpStatus].filter(
+      (s) => s === 'connected'
+    ).length;
+    const totalServices = 2;
+
     let color: string;
     if (connectedServices === totalServices) {
       color = '#10b981'; // Green - all systems operational
@@ -80,7 +104,7 @@ async function buildServer() {
     }
 
     const svg = generateFaviconSVG(color);
-    
+
     reply
       .type('image/svg+xml')
       .header('Cache-Control', 'no-cache, no-store, must-revalidate')
@@ -91,41 +115,48 @@ async function buildServer() {
 
   // Health check route with comprehensive system status
   app.get('/health', async (request, reply) => {
+    const config = getConfig();
     const startTime = process.hrtime.bigint();
     const memoryUsage = process.memoryUsage();
     const uptime = process.uptime();
-    
-    const healthData = {
+
+    const healthData: HealthData = {
       status: 'ok',
       timestamp: new Date().toISOString(),
       uptime: Math.floor(uptime),
       version: process.env.npm_package_version || '1.0.0',
-      environment: process.env.NODE_ENV || 'development',
+      environment: config.NODE_ENV,
       nodeVersion: process.version,
       platform: process.platform,
       architecture: process.arch,
       processId: process.pid,
       startTime: new Date(Date.now() - uptime * 1000).toISOString(),
-      cpuUsage: Math.round((process.cpuUsage().user + process.cpuUsage().system) / 1000) / 1000,
+      cpuUsage:
+        Math.round((process.cpuUsage().user + process.cpuUsage().system) / 1000) / 1000,
       memory: {
         rss: Math.round(memoryUsage.rss / 1024 / 1024),
         heapUsed: Math.round(memoryUsage.heapUsed / 1024 / 1024),
         heapTotal: Math.round(memoryUsage.heapTotal / 1024 / 1024),
         external: Math.round(memoryUsage.external / 1024 / 1024),
-        buffers: Math.round((memoryUsage as any).buffers / 1024 / 1024) || 0,
+        buffers:
+          Math.round(
+            ((memoryUsage as NodeJS.MemoryUsage & { arrayBuffers?: number }).arrayBuffers ?? 0) /
+              1024 /
+              1024
+          ) || 0,
         heapUtilization: Math.round((memoryUsage.heapUsed / memoryUsage.heapTotal) * 100),
-        totalSystemMemory: Math.round(os.totalmem() / 1024 / 1024 / 1024 * 100) / 100,
-        freeSystemMemory: Math.round(os.freemem() / 1024 / 1024 / 1024 * 100) / 100,
+        totalSystemMemory: Math.round((os.totalmem() / 1024 / 1024 / 1024) * 100) / 100,
+        freeSystemMemory: Math.round((os.freemem() / 1024 / 1024 / 1024) * 100) / 100,
         systemMemoryChart: (() => {
           const totalMB = Math.round(os.totalmem() / 1024 / 1024);
           const freeMB = Math.round(os.freemem() / 1024 / 1024);
           const processMB = Math.round(memoryUsage.rss / 1024 / 1024);
           const otherMB = totalMB - freeMB - processMB;
-          
+
           const processPercent = Math.round((processMB / totalMB) * 100);
           const freePercent = Math.round((freeMB / totalMB) * 100);
           const otherPercent = 100 - processPercent - freePercent;
-          
+
           return {
             processPercent,
             freePercent,
@@ -136,46 +167,22 @@ async function buildServer() {
           };
         })()
       },
-      services: {} as Record<string, any>,
+      services: {},
       responseTime: 0
     };
-
-    // Test LanceDB connection
-    try {
-      const table = app.lance?.productsTable;
-      if (table) {
-        const countResult = await table.countRows();
-        healthData.services.lancedb = {
-          status: 'connected',
-          recordCount: countResult,
-          tableName: 'products'
-        };
-      } else {
-        healthData.services.lancedb = {
-          status: 'not_initialized',
-          error: 'LanceDB table not found'
-        };
-      }
-    } catch (error) {
-      healthData.services.lancedb = {
-        status: 'error',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      };
-    }
 
     // Test Shopware connection
     try {
       if (app.shopware) {
-        // Use version endpoint for lightweight connectivity test
         const versionResponse = await app.shopware.get('/_info/version');
-        
-        const versionData = versionResponse.data as any;
+
+        const versionData = versionResponse.data as { version?: string; versionRevision?: string };
         healthData.services.shopware = {
           status: 'connected',
-          apiUrl: config.SHOPWARE_API_URL,
+          apiUrl: maskSensitiveUrl(config.SHOPWARE_API_URL),
           version: versionData?.version || 'unknown',
           versionRevision: versionData?.versionRevision || 'unknown',
-          responseTime: versionResponse.headers?.['x-response-time'] || 'unknown'
+          responseTime: (versionResponse.headers?.['x-response-time'] as string) || 'unknown'
         };
       } else {
         healthData.services.shopware = {
@@ -184,26 +191,22 @@ async function buildServer() {
         };
       }
     } catch (error) {
+      app.log.warn({ error }, 'Shopware health check failed');
       healthData.services.shopware = {
         status: 'error',
-        error: error instanceof Error ? error.message : 'Connection failed',
-        apiUrl: config.SHOPWARE_API_URL,
-        details: error instanceof Error && 'response' in error 
-          ? `HTTP ${(error as any).response?.status} - ${(error as any).response?.statusText}`
-          : 'Network or configuration error'
+        error: 'Connection failed', // Don't expose internal error details
+        details: 'Unable to connect to Shopware API'
       };
     }
 
     // Test MCP tools by making actual HTTP call to the MCP endpoint
-    const testProductNumber = 'JA-000001';
+    const testProductNumber = config.HEALTH_CHECK_PRODUCT_NUMBER;
     try {
-      
-      // Make a real MCP tool call via HTTP JSON-RPC
       const mcpRequest = {
-        jsonrpc: "2.0",
-        method: "tools/call",
+        jsonrpc: '2.0',
+        method: 'tools/call',
         params: {
-          name: "get-stock-level",
+          name: 'get-stock-level',
           arguments: {
             productNumber: testProductNumber
           }
@@ -211,28 +214,34 @@ async function buildServer() {
         id: 1
       };
 
-      const mcpResponse = await axios.post(`http://localhost:${config.PORT}/mcp`, mcpRequest, {
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json, text/event-stream'
-        },
-        timeout: 5000,
-        validateStatus: () => true // Don't throw on HTTP error codes
-      });
+      const mcpResponse = await axios.post(
+        `http://localhost:${config.PORT}/mcp`,
+        mcpRequest,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream'
+          },
+          timeout: 5000,
+          validateStatus: () => true
+        }
+      );
 
       if (mcpResponse.status === 200) {
-        const responseBody = mcpResponse.data;
-        
+        const responseBody = mcpResponse.data as {
+          error?: { message: string; code: number };
+          result?: { content?: unknown[] };
+        };
+
         if (responseBody.error) {
           healthData.services.mcp = {
             status: 'error',
             testTool: 'get-stock-level',
             testProductNumber: testProductNumber,
-            error: `JSON-RPC error: ${responseBody.error.message}`,
+            error: 'Tool call failed',
             errorCode: responseBody.error.code
           };
         } else {
-          // MCP tool call succeeded
           const toolResult = responseBody.result;
           healthData.services.mcp = {
             status: 'connected',
@@ -247,37 +256,27 @@ async function buildServer() {
           status: 'error',
           testTool: 'get-stock-level',
           testProductNumber: testProductNumber,
-          error: `HTTP ${mcpResponse.status}: ${mcpResponse.statusText}`,
-          responseBody: typeof mcpResponse.data === 'string' ? mcpResponse.data.substring(0, 200) : JSON.stringify(mcpResponse.data).substring(0, 200)
+          error: `HTTP ${mcpResponse.status}`
         };
       }
     } catch (error) {
       let errorMessage = 'Unknown error';
-      let isNetworkError = false;
-      
+
       if (axios.isAxiosError(error)) {
         if (error.code === 'ECONNREFUSED') {
-          errorMessage = 'Connection refused - MCP endpoint not available';
-          isNetworkError = true;
+          errorMessage = 'MCP endpoint not available';
         } else if (error.code === 'ETIMEDOUT') {
-          errorMessage = 'Request timeout - MCP endpoint not responding';
-          isNetworkError = true;
-        } else if (error.response) {
-          errorMessage = `HTTP ${error.response.status}: ${error.response.statusText}`;
+          errorMessage = 'MCP endpoint timeout';
         } else {
-          errorMessage = error.message;
-          isNetworkError = true;
+          errorMessage = 'Connection failed';
         }
-      } else if (error instanceof Error) {
-        errorMessage = error.message;
       }
-      
+
       healthData.services.mcp = {
         status: 'error',
         testTool: 'get-stock-level',
         testProductNumber: testProductNumber,
-        error: errorMessage,
-        errorType: isNetworkError ? 'network' : 'unknown'
+        error: errorMessage
       };
     }
 
@@ -288,9 +287,9 @@ async function buildServer() {
 
     // Determine overall health status
     const hasErrors = Object.values(healthData.services).some(
-      service => service.status === 'error'
+      (service) => service.status === 'error'
     );
-    
+
     if (hasErrors) {
       healthData.status = 'degraded';
       reply.code(503);
@@ -299,11 +298,12 @@ async function buildServer() {
     // Content negotiation: return HTML for browsers, JSON for API clients
     const acceptHeader = request.headers.accept || '';
     const userAgent = request.headers['user-agent'] || '';
-    const wantsHtml = acceptHeader.includes('text/html') || 
-                      userAgent.includes('Mozilla') || 
-                      userAgent.includes('Chrome') || 
-                      userAgent.includes('Safari') || 
-                      userAgent.includes('Edge');
+    const wantsHtml =
+      acceptHeader.includes('text/html') ||
+      userAgent.includes('Mozilla') ||
+      userAgent.includes('Chrome') ||
+      userAgent.includes('Safari') ||
+      userAgent.includes('Edge');
 
     if (wantsHtml) {
       reply.type('text/html');
@@ -316,26 +316,80 @@ async function buildServer() {
   return { app, config } as const;
 }
 
+interface HealthData {
+  status: string;
+  timestamp: string;
+  uptime: number;
+  version: string;
+  environment: string;
+  nodeVersion: string;
+  platform: string;
+  architecture: string;
+  processId: number;
+  startTime: string;
+  cpuUsage: number;
+  memory: {
+    rss: number;
+    heapUsed: number;
+    heapTotal: number;
+    external: number;
+    buffers: number;
+    heapUtilization: number;
+    totalSystemMemory: number;
+    freeSystemMemory: number;
+    systemMemoryChart: {
+      processPercent: number;
+      freePercent: number;
+      otherPercent: number;
+      processMB: number;
+      freeMB: number;
+      otherMB: number;
+    };
+  };
+  services: Record<
+    string,
+    {
+      status: string;
+      error?: string;
+      errorCode?: number;
+      recordCount?: number;
+      tableName?: string;
+      apiUrl?: string;
+      version?: string;
+      versionRevision?: string;
+      responseTime?: string;
+      details?: string;
+      testTool?: string;
+      testProductNumber?: string;
+      testResult?: string;
+      hasContent?: boolean;
+    }
+  >;
+  responseTime: number;
+}
+
 function generateFaviconSVG(color: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
-  <circle cx="16" cy="16" r="14" fill="${color}" stroke="white" stroke-width="2"/>
+  <circle cx="16" cy="16" r="14" fill="${escapeHtml(color)}" stroke="white" stroke-width="2"/>
 </svg>`;
 }
 
-function generateHealthHTML(healthData: any): string {
-
+function generateHealthHTML(healthData: HealthData): string {
   const formatUptime = (seconds: number) => {
     const days = Math.floor(seconds / 86400);
     const hours = Math.floor((seconds % 86400) / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
-    
+
     if (days > 0) return `${days}d ${hours}h ${mins}m`;
     if (hours > 0) return `${hours}h ${mins}m ${secs}s`;
     if (mins > 0) return `${mins}m ${secs}s`;
     return `${secs}s`;
   };
 
+  // Validate status is one of expected values to prevent XSS
+  const validStatuses = ['ok', 'degraded', 'error'];
+  const safeStatus = validStatuses.includes(healthData.status) ? healthData.status : 'error';
 
   return `
 <!DOCTYPE html>
@@ -346,12 +400,12 @@ function generateHealthHTML(healthData: any): string {
     <title>Weltmann Shopware MCP - Health Dashboard</title>
     <link rel="icon" href="/favicon.ico" type="image/svg+xml">
     <style>
-        * { 
-            margin: 0; 
-            padding: 0; 
-            box-sizing: border-box; 
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        body { 
+        body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             background-color: #f8fafc;
             color: #374151;
@@ -359,8 +413,8 @@ function generateHealthHTML(healthData: any): string {
             min-height: 100vh;
             padding: 20px;
         }
-        .container { 
-            max-width: 1200px; 
+        .container {
+            max-width: 1200px;
             margin: 0 auto;
         }
         .header {
@@ -561,12 +615,12 @@ function generateHealthHTML(healthData: any): string {
     <div class="auto-refresh" id="refresh-indicator">
         Auto-refresh: 30s
     </div>
-    
+
     <div class="container">
         <div class="header">
             <h1>Weltmann Shopware MCP</h1>
-            <div class="status-badge status-${healthData.status}">
-                System Status: ${healthData.status.toUpperCase()}
+            <div class="status-badge status-${safeStatus}">
+                System Status: ${escapeHtml(safeStatus.toUpperCase())}
             </div>
         </div>
 
@@ -577,43 +631,43 @@ function generateHealthHTML(healthData: any): string {
                 <div class="info-grid">
                     <div class="info-item">
                         <div class="info-label">Uptime</div>
-                        <div class="info-value">${formatUptime(healthData.uptime)}</div>
+                        <div class="info-value">${escapeHtml(formatUptime(healthData.uptime))}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Version</div>
-                        <div class="info-value">${healthData.version}</div>
+                        <div class="info-value">${escapeHtml(healthData.version)}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Environment</div>
-                        <div class="info-value">${healthData.environment}</div>
+                        <div class="info-value">${escapeHtml(healthData.environment)}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Response Time</div>
-                        <div class="info-value">${healthData.responseTime}ms</div>
+                        <div class="info-value">${escapeHtml(String(healthData.responseTime))}ms</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">CPU Usage</div>
-                        <div class="info-value">${healthData.cpuUsage}ms</div>
+                        <div class="info-value">${escapeHtml(String(healthData.cpuUsage))}ms</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Node.js</div>
-                        <div class="info-value">${healthData.nodeVersion}</div>
+                        <div class="info-value">${escapeHtml(healthData.nodeVersion)}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Platform</div>
-                        <div class="info-value">${healthData.platform}</div>
+                        <div class="info-value">${escapeHtml(healthData.platform)}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Process ID</div>
-                        <div class="info-value">${healthData.processId}</div>
+                        <div class="info-value">${escapeHtml(String(healthData.processId))}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Start Date</div>
-                        <div class="info-value">${new Date(healthData.startTime).toLocaleDateString('en-GB')}</div>
+                        <div class="info-value">${escapeHtml(new Date(healthData.startTime).toLocaleDateString('en-GB'))}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Start Time</div>
-                        <div class="info-value">${new Date(healthData.startTime).toLocaleTimeString('en-GB', { hour12: false })}</div>
+                        <div class="info-value">${escapeHtml(new Date(healthData.startTime).toLocaleTimeString('en-GB', { hour12: false }))}</div>
                     </div>
                 </div>
             </div>
@@ -623,11 +677,11 @@ function generateHealthHTML(healthData: any): string {
                 <h3>Memory Usage</h3>
                 <div class="memory-section">
                     <div class="memory-header">
-                        <span>Heap Memory (${healthData.memory.heapUtilization}%)</span>
-                        <span>${healthData.memory.heapUsed}MB / ${healthData.memory.heapTotal}MB</span>
+                        <span>Heap Memory (${escapeHtml(String(healthData.memory.heapUtilization))}%)</span>
+                        <span>${escapeHtml(String(healthData.memory.heapUsed))}MB / ${escapeHtml(String(healthData.memory.heapTotal))}MB</span>
                     </div>
                     <div class="memory-bar">
-                        <div class="memory-fill" style="width: ${healthData.memory.heapUtilization}%;"></div>
+                        <div class="memory-fill" style="width: ${Math.min(Math.max(healthData.memory.heapUtilization, 0), 100)}%;"></div>
                     </div>
                 </div>
                 <div class="memory-chart-section">
@@ -638,34 +692,34 @@ function generateHealthHTML(healthData: any): string {
                     <div class="chart-legend">
                         <div class="legend-item">
                             <div class="legend-color legend-process"></div>
-                            <span>Process (${healthData.memory.systemMemoryChart.processPercent}%) - ${healthData.memory.systemMemoryChart.processMB}MB</span>
+                            <span>Process (${escapeHtml(String(healthData.memory.systemMemoryChart.processPercent))}%) - ${escapeHtml(String(healthData.memory.systemMemoryChart.processMB))}MB</span>
                         </div>
                         <div class="legend-item">
                             <div class="legend-color legend-free"></div>
-                            <span>Available (${healthData.memory.systemMemoryChart.freePercent}%) - ${healthData.memory.systemMemoryChart.freeMB}MB</span>
+                            <span>Available (${escapeHtml(String(healthData.memory.systemMemoryChart.freePercent))}%) - ${escapeHtml(String(healthData.memory.systemMemoryChart.freeMB))}MB</span>
                         </div>
                         <div class="legend-item">
                             <div class="legend-color legend-other"></div>
-                            <span>Other Processes (${healthData.memory.systemMemoryChart.otherPercent}%) - ${healthData.memory.systemMemoryChart.otherMB}MB</span>
+                            <span>Other Processes (${escapeHtml(String(healthData.memory.systemMemoryChart.otherPercent))}%) - ${escapeHtml(String(healthData.memory.systemMemoryChart.otherMB))}MB</span>
                         </div>
                     </div>
                 </div>
                 <div class="info-grid">
                     <div class="info-item">
                         <div class="info-label">RSS Memory</div>
-                        <div class="info-value">${healthData.memory.rss}MB</div>
+                        <div class="info-value">${escapeHtml(String(healthData.memory.rss))}MB</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">External Memory</div>
-                        <div class="info-value">${healthData.memory.external}MB</div>
+                        <div class="info-value">${escapeHtml(String(healthData.memory.external))}MB</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Buffer Memory</div>
-                        <div class="info-value">${healthData.memory.buffers}MB</div>
+                        <div class="info-value">${escapeHtml(String(healthData.memory.buffers))}MB</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">System Memory</div>
-                        <div class="info-value">${healthData.memory.totalSystemMemory}GB</div>
+                        <div class="info-value">${escapeHtml(String(healthData.memory.totalSystemMemory))}GB</div>
                     </div>
                 </div>
             </div>
@@ -673,26 +727,40 @@ function generateHealthHTML(healthData: any): string {
             <!-- Services Card -->
             <div class="card">
                 <h3>Services Status</h3>
-                ${Object.entries(healthData.services).map(([name, service]: [string, any]) => `
+                ${Object.entries(healthData.services)
+                  .map(([name, service]) => {
+                    const validServiceStatuses = ['connected', 'error', 'not_initialized', 'warning'];
+                    const safeServiceStatus = validServiceStatuses.includes(service.status)
+                      ? service.status
+                      : 'error';
+
+                    const displayName =
+                      name === 'mcp'
+                        ? 'MCP'
+                        : name.charAt(0).toUpperCase() + name.slice(1);
+
+                    let details = '';
+                    if (service.status === 'connected') {
+                      if (name === 'mcp') {
+                        details = `test: ${escapeHtml(service.testResult ?? 'unknown')}`;
+                      } else {
+                        details = `Version ${escapeHtml(service.version ?? 'unknown')} - ${escapeHtml(service.apiUrl ?? '(configured)')}`;
+                      }
+                    } else {
+                      details = escapeHtml(service.error || 'Unknown error');
+                    }
+
+                    return `
                     <div class="service-status">
-                        <div class="service-icon service-${service.status}"></div>
+                        <div class="service-icon service-${safeServiceStatus === 'connected' ? 'connected' : 'error'}"></div>
                         <div class="service-info">
-                            <div class="service-name">${name === 'lancedb' ? 'LanceDB' : name === 'mcp' ? 'MCP' : name.charAt(0).toUpperCase() + name.slice(1)}</div>
-                            <div class="service-details">
-                                ${service.status === 'connected' 
-                                  ? name === 'lancedb' 
-                                    ? `${service.recordCount.toLocaleString()} records in ${service.tableName} table`
-                                    : name === 'mcp'
-                                    ? `test: ${service.testResult}`
-                                    : `Version ${service.version} • ${service.apiUrl}`
-                                  : name === 'mcp' && service.errorCode
-                                  ? `${service.error}<br>Product: ${service.testProductNumber || 'n/a'}${service.errorCode ? `<br>Code: ${service.errorCode}` : ''}`
-                                  : service.error || 'Unknown error'
-                                }
-                            </div>
+                            <div class="service-name">${escapeHtml(displayName)}</div>
+                            <div class="service-details">${details}</div>
                         </div>
                     </div>
-                `).join('')}
+                `;
+                  })
+                  .join('')}
             </div>
         </div>
 
@@ -701,32 +769,56 @@ function generateHealthHTML(healthData: any): string {
     <script>
         let countdown = 30;
         const refreshIndicator = document.getElementById('refresh-indicator');
-        
+
         const updateCountdown = () => {
             refreshIndicator.textContent = \`Auto-refresh: \${countdown}s\`;
             countdown--;
-            
+
             if (countdown < 0) {
                 location.reload();
             }
         };
-        
+
         setInterval(updateCountdown, 1000);
     </script>
 </body>
 </html>`;
 }
 
+let app: Awaited<ReturnType<typeof buildServer>>['app'] | null = null;
+
 async function start() {
-  const { app, config } = await buildServer();
+  const { app: server, config } = await buildServer();
+  app = server;
 
   try {
-    await app.listen({ port: config.PORT, host: '0.0.0.0' });
-    app.log.info(`Server listening on port ${config.PORT}`);
+    await server.listen({ port: config.PORT, host: config.SERVER_HOST });
+    server.log.info(`Server listening on ${config.SERVER_HOST}:${config.PORT}`);
   } catch (err) {
-    app.log.error(err);
+    server.log.error(err);
     process.exit(1);
   }
 }
 
-void start(); 
+// Graceful shutdown
+const gracefulShutdown = async (signal: string) => {
+  console.log(`Received ${signal}, shutting down gracefully...`);
+  try {
+    if (app) {
+      await app.close();
+    }
+    process.exit(0);
+  } catch (err) {
+    console.error('Error during shutdown:', err);
+    process.exit(1);
+  }
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Start the server with proper error handling
+start().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
+});
