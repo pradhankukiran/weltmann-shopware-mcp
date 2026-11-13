@@ -56,6 +56,10 @@ export class ShopwareAdminClient {
    * Check if an error is retryable (5xx, 401, network errors)
    */
   private isRetryableError(error: unknown): boolean {
+    // safePost/safeGet wrap axios errors; look at the original error
+    if (error instanceof ShopwareApiError && error.originalError) {
+      error = error.originalError;
+    }
     if (axios.isAxiosError(error)) {
       const status = error.response?.status;
       // Retry on network errors and timeouts
@@ -76,17 +80,23 @@ export class ShopwareAdminClient {
   }
 
   /**
-   * Execute an operation with retry logic and exponential backoff
+   * Execute an operation with retry logic and exponential backoff.
+   * The whole call, including retries and token refresh, must finish within
+   * SHOPWARE_CALL_BUDGET_MS so voice agents are not left waiting.
    */
   private async withRetry<T>(
     operation: () => Promise<T>,
     context: string
   ): Promise<T> {
+    const deadline = Date.now() + getConfig().SHOPWARE_CALL_BUDGET_MS;
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+
       try {
-        return await operation();
+        return await this.withDeadline(operation(), remaining, context);
       } catch (error) {
         lastError = error as Error;
 
@@ -94,19 +104,35 @@ export class ShopwareAdminClient {
           throw error;
         }
 
-        // Don't sleep after the last attempt
-        if (attempt < this.maxRetries - 1) {
-          const delay = this.baseDelayMs * Math.pow(2, attempt);
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[ShopwareAdminClient] ${context} failed (attempt ${attempt + 1}/${this.maxRetries}), retrying in ${delay}ms`
-          );
-          await new Promise(resolve => setTimeout(resolve, delay));
+        const delay = this.baseDelayMs * Math.pow(2, attempt);
+        // Stop if this was the last attempt or there is no time left for another
+        if (attempt === this.maxRetries - 1 || Date.now() + delay >= deadline) {
+          break;
         }
+
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ShopwareAdminClient] ${context} failed (attempt ${attempt + 1}/${this.maxRetries}), retrying in ${delay}ms`
+        );
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
 
-    throw lastError;
+    throw lastError ?? new ShopwareApiError(`${context} timed out`, context);
+  }
+
+  /**
+   * Reject if the operation does not settle within the given time.
+   */
+  private withDeadline<T>(promise: Promise<T>, ms: number, context: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new ShopwareApiError(`${context} timed out after ${ms}ms`, context)),
+        ms
+      );
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
   private async fetchToken(): Promise<OAuthTokenResponse> {

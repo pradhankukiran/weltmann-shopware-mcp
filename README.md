@@ -100,7 +100,8 @@ MCP_API_KEY=your-secure-api-key
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SHOPWARE_API_TIMEOUT` | `10000` | Shopware request timeout (ms) |
+| `SHOPWARE_API_TIMEOUT` | `8000` | Timeout for a single Shopware request (ms) |
+| `SHOPWARE_CALL_BUDGET_MS` | `12000` | Max time for one Shopware lookup, including retries (ms) |
 | `DEFAULT_PAGE_SIZE` | `10` | Default results per page |
 | `MAX_PAGE_SIZE` | `250` | Max results per Shopware request |
 | `MAX_PAGINATION_ITERATIONS` | `100` | Safety cap on pages fetched |

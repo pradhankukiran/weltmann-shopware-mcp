@@ -13,7 +13,10 @@ const envSchema = z.object({
   SHOPWARE_API_URL: z.string().url(),
   SHOPWARE_ACCESS_KEY_ID: z.string(),
   SHOPWARE_SECRET_ACCESS_KEY: z.string(),
-  SHOPWARE_API_TIMEOUT: z.coerce.number().default(10000),
+  SHOPWARE_API_TIMEOUT: z.coerce.number().default(8000),
+  // Max time for one Shopware call including retries. Keep well under the
+  // ElevenLabs tool timeout (30s by default); some tools make two calls.
+  SHOPWARE_CALL_BUDGET_MS: z.coerce.number().default(12000),
 
   // Pagination defaults
   DEFAULT_PAGE_SIZE: z.coerce.number().default(10),

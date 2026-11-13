@@ -116,6 +116,14 @@ export function sanitizeErrorForClient(error: unknown): SanitizedError {
         isRetryable: false
       };
     }
+    // No HTTP status means a timeout or connection problem
+    if (error.statusCode === undefined || error.statusCode >= 500) {
+      return {
+        message: GENERIC_ERROR_MESSAGES.NETWORK,
+        code: 'NETWORK_ERROR',
+        isRetryable: true
+      };
+    }
     // Otherwise use a sanitized version of the message
     return {
       message: error.message.replace(/https?:\/\/[^\s]+/g, '[url]'),
