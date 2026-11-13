@@ -2,6 +2,14 @@ import { FastifyPluginAsync } from 'fastify';
 import { z, ZodError } from 'zod';
 import { stripHtml, logErrorDetails, sanitizeErrorForClient } from '../utils';
 
+const errorResponseSchema = {
+  type: 'object',
+  properties: {
+    error: { type: 'string' },
+    details: { type: 'array', items: { type: 'string' } }
+  }
+} as const;
+
 const route: FastifyPluginAsync = async (fastify) => {
   const querySchema = z.object({
     term: z.string().min(2, 'Search term must be at least 2 characters').optional(),
@@ -43,7 +51,9 @@ const route: FastifyPluginAsync = async (fastify) => {
                 }
               }
             }
-          }
+          },
+          400: errorResponseSchema,
+          500: errorResponseSchema
         }
       }
     },

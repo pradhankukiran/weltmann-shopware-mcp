@@ -3,6 +3,14 @@ import { z, ZodError } from 'zod';
 import { stripExtensionsDeep, mapOrderEssentials, logErrorDetails, sanitizeErrorForClient } from '../utils';
 import type { ShopwareOrder } from '../types/shopware';
 
+const errorResponseSchema = {
+  type: 'object',
+  properties: {
+    error: { type: 'string' },
+    details: { type: 'array', items: { type: 'string' } }
+  }
+} as const;
+
 const route: FastifyPluginAsync = async (fastify) => {
   const querySchema = z.object({
     orderNumber: z.string().min(1, 'Order number cannot be empty').optional(),
@@ -27,7 +35,9 @@ const route: FastifyPluginAsync = async (fastify) => {
           200: {
             type: 'object',
             additionalProperties: true
-          }
+          },
+          400: errorResponseSchema,
+          500: errorResponseSchema
         }
       }
     },
