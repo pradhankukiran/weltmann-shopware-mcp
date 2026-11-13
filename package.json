@@ -28,13 +28,10 @@
     "@fastify/swagger-ui": "^1.7.0",
     "@modelcontextprotocol/sdk": "^1.13.1",
     "axios": "^1.4.0",
-    "csv-parse": "^6.1.0",
     "dotenv": "^16.3.1",
     "fastify": "^4.22.2",
     "fastify-plugin": "^4.4.0",
-    "mcp-remote": "^0.1.16",
     "papaparse": "^5.5.3",
-    "pino": "^8.17.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
