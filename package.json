@@ -22,6 +22,9 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@fastify/cors": "^11.4.3",
     "@fastify/swagger": "^9.9.4",
