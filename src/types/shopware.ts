@@ -74,6 +74,7 @@ export interface OrderCustomer {
  * Delivery entity
  */
 export interface OrderDelivery {
+  id?: string;
   stateMachineState?: StateMachineState;
   shippingOrderAddress?: ShopwareAddress;
   trackingCodes?: string[];
@@ -87,6 +88,7 @@ export interface OrderDelivery {
  * Transaction entity
  */
 export interface OrderTransaction {
+  id?: string;
   stateMachineState?: StateMachineState;
   paymentMethod?: {
     name?: string;
@@ -137,6 +139,9 @@ export interface ShopwareOrder extends ShopwareEntity {
   shippingTotal?: number;
   stateId?: string;
   stateMachineState?: StateMachineState;
+  // Set by Shopware 6.7.1+; older versions leave these empty
+  primaryOrderDeliveryId?: string | null;
+  primaryOrderTransactionId?: string | null;
   orderCustomer?: OrderCustomer;
   salesChannel?: SalesChannel;
   deliveries?: OrderDelivery[];
@@ -172,6 +177,12 @@ export interface OrderEssentials {
     salesChannel: string | null;
   };
   status: {
+    overall: string | null;
+    payment: string | null;
+    shipping: string | null;
+  };
+  // Fixed technical state names (e.g. "shipped", "paid"), independent of admin language
+  statusCodes: {
     overall: string | null;
     payment: string | null;
     shipping: string | null;

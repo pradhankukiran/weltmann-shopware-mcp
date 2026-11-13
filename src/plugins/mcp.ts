@@ -10,6 +10,7 @@ import {
   first,
   stripExtensionsDeep,
   mapOrderEssentials,
+  pickPrimary,
   sanitizeErrorForClient,
   logErrorDetails
 } from '../utils';
@@ -99,6 +100,11 @@ const registerTools = (fastifyInstance: FastifyInstance, serverInstance: McpServ
           salesChannel: z.string().nullable()
         }),
         status: z.object({
+          overall: z.string().nullable(),
+          payment: z.string().nullable(),
+          shipping: z.string().nullable()
+        }),
+        statusCodes: z.object({
           overall: z.string().nullable(),
           payment: z.string().nullable(),
           shipping: z.string().nullable()
@@ -406,56 +412,38 @@ const registerTools = (fastifyInstance: FastifyInstance, serverInstance: McpServ
 
         const essential = mapOrderEssentials(orderData as Parameters<typeof mapOrderEssentials>[0]);
 
-        const getCustomerFriendlyStatus = (status: { shipping?: string | null; overall?: string | null }) => {
-          const shippingRaw = (status.shipping ?? status.overall ?? 'unknown').toString();
-          const shipping = shippingRaw.toLowerCase();
-          switch (shipping) {
+        // Use Shopware's fixed technical state names; display names change with admin language
+        const statusCode = essential.statusCodes.shipping ?? essential.statusCodes.overall;
+        const statusName = essential.status.shipping ?? essential.status.overall;
+
+        const getCustomerFriendlyStatus = (code: string | null): string => {
+          switch (code) {
             case 'open':
-            case 'in progress':
+            case 'in_progress':
               return 'Your order has been received and is currently being processed.';
-            case 'partially shipped':
             case 'shipped':
+            case 'shipped_partially':
             case 'completed':
-            case 'teilversandt':
-            case 'versandt':
-            case 'abgeschlossen':
               return 'Good news! Your order has already been shipped.';
             case 'cancelled':
-            case 'storniert':
               return 'Unfortunately, this order has been cancelled.';
             case 'returned':
-            case 'retour':
+            case 'returned_partially':
               return 'This order was returned to us.';
+            case null:
+              return 'There is no shipping status for this order yet.';
             default:
-              return `Current status: ${shippingRaw}`;
+              return `Current status: ${statusName ?? code}`;
           }
         };
 
-        const calculateDeliveryEstimate = (_order: typeof essential): string | null => {
-          const shippingState = (_order.status.shipping ?? _order.status.overall ?? '')
-            .toString()
-            .toLowerCase();
-          if (!shippingState) return null;
-
-          const shippedStates = [
-            'shipped',
-            'versandt',
-            'teilversandt',
-            'partially shipped',
-            'completed',
-            'abgeschlossen'
-          ];
-
-          if (shippedStates.includes(shippingState)) {
-            return 'Usually delivered within 2–5 business days.';
-          }
-
-          return null;
-        };
-
-        const statusText = getCustomerFriendlyStatus(essential.status);
-        const deliveryEstimate = calculateDeliveryEstimate(essential);
-        const rawStatus = essential.status.shipping ?? essential.status.overall ?? 'unknown';
+        const shippedCodes = ['shipped', 'shipped_partially', 'completed'];
+        const statusText = getCustomerFriendlyStatus(statusCode);
+        const deliveryEstimate =
+          statusCode && shippedCodes.includes(statusCode)
+            ? 'Usually delivered within 2–5 business days.'
+            : null;
+        const rawStatus = statusCode ?? 'unknown';
 
         return structuredResponse(
           `**Order #${orderNumber}**\n${statusText}${deliveryEstimate ? `\nEstimated delivery: ${deliveryEstimate}` : ''}`,
@@ -511,44 +499,46 @@ const registerTools = (fastifyInstance: FastifyInstance, serverInstance: McpServ
           return notFoundResponse('Order', orderNumber);
         }
 
-        const transactions = order.transactions as Array<Record<string, unknown>> | undefined;
-        const firstTx = first(transactions) ?? {};
-        const stateMachineState = firstTx.stateMachineState as Record<string, unknown> | undefined;
-        const paymentStateRaw = (stateMachineState?.name as string) ?? 'unknown';
-        const paymentState = paymentStateRaw.toString().toLowerCase();
+        const transactions = order.transactions as Array<Record<string, unknown> & { id?: string }> | undefined;
+        const tx = pickPrimary(transactions, order.primaryOrderTransactionId as string | null | undefined) ?? {};
+        const stateMachineState = tx.stateMachineState as Record<string, unknown> | undefined;
+        // Use the fixed technical name; the display name changes with admin language
+        const paymentCode = (stateMachineState?.technicalName as string | undefined) ?? null;
+        const paymentStateName = (stateMachineState?.name as string | undefined) ?? null;
+        const paymentStateRaw = paymentCode ?? 'unknown';
 
-        const paymentMethod = firstTx.paymentMethod as Record<string, unknown> | undefined;
+        const paymentMethod = tx.paymentMethod as Record<string, unknown> | undefined;
         const paymentMethodName: string | null = (paymentMethod?.name as string) ?? null;
 
-        const getFriendlyPaymentStatus = (state: string) => {
-          switch (state) {
+        const getFriendlyPaymentStatus = (code: string | null): string => {
+          switch (code) {
             case 'open':
+            case 'unconfirmed':
+            case 'reminded':
+            case 'authorized':
             case 'in_progress':
-            case 'in progress':
-            case 'pending':
-            case 'offen':
               return 'Payment is still pending.';
             case 'paid':
-            case 'completed':
-            case 'bezahlt':
-            case 'abgeschlossen':
               return 'Payment received. Thank you!';
+            case 'paid_partially':
+              return 'Part of the payment has been received.';
+            case 'failed':
+              return 'The payment did not go through.';
             case 'cancelled':
-            case 'canceled':
-            case 'storniert':
               return 'The payment was cancelled.';
             case 'refunded':
-            case 're-credited':
-            case 'erstattet':
+            case 'refunded_partially':
               return 'The payment was refunded.';
+            case null:
+              return 'There is no payment status for this order yet.';
             default:
-              return `Current payment status: ${paymentStateRaw}`;
+              return `Current payment status: ${paymentStateName ?? code}`;
           }
         };
 
-        const paymentStatusText = getFriendlyPaymentStatus(paymentState);
+        const paymentStatusText = getFriendlyPaymentStatus(paymentCode);
         const methodLine = paymentMethodName ? `Payment method: ${paymentMethodName}\n` : '';
-        const isPaid = ['paid', 'completed', 'bezahlt', 'abgeschlossen'].includes(paymentState);
+        const isPaid = paymentCode === 'paid';
 
         return structuredResponse(
           `**Order #${orderNumber}**\n${paymentStatusText}\n${methodLine}`.trimEnd(),

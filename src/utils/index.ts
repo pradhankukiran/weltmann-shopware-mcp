@@ -16,4 +16,4 @@ export type { SanitizedError } from './errors';
 export { escapeHtml, escapeAttr, maskSensitiveUrl } from './html';
 
 // Shopware utilities
-export { stripExtensionsDeep, mapOrderEssentials } from './shopware';
+export { stripExtensionsDeep, mapOrderEssentials, pickPrimary } from './shopware';

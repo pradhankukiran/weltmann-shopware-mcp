@@ -4,7 +4,13 @@
 
 import { stripHtml } from './strings';
 import { first } from './array';
-import type { ShopwareOrder, OrderEssentials, LineItem } from '../types/shopware';
+import type {
+  ShopwareOrder,
+  OrderEssentials,
+  LineItem,
+  OrderDelivery,
+  OrderTransaction
+} from '../types/shopware';
 
 /**
  * Recursively remove Shopware housekeeping keys (extensions, _uniqueIdentifier, etc.)
@@ -29,11 +35,28 @@ export function stripExtensionsDeep<T>(input: T): T {
 }
 
 /**
+ * Pick the order's primary delivery/transaction (Shopware 6.7.1+).
+ * Falls back to the first entry on older Shopware versions.
+ */
+export function pickPrimary<T extends { id?: string }>(
+  items: T[] | undefined | null,
+  primaryId: string | null | undefined
+): T | undefined {
+  if (primaryId && items) {
+    const match = items.find((item) => item.id === primaryId);
+    if (match) return match;
+  }
+  return first(items);
+}
+
+/**
  * Map a raw Shopware order to a compact essentials-only view.
  */
 export function mapOrderEssentials(order: ShopwareOrder): OrderEssentials {
-  const firstDelivery = first(order.deliveries) ?? {};
-  const firstTransaction = first(order.transactions) ?? {};
+  const firstDelivery: OrderDelivery =
+    pickPrimary(order.deliveries, order.primaryOrderDeliveryId) ?? {};
+  const firstTransaction: OrderTransaction =
+    pickPrimary(order.transactions, order.primaryOrderTransactionId) ?? {};
 
   return {
     customer: {
@@ -49,6 +72,11 @@ export function mapOrderEssentials(order: ShopwareOrder): OrderEssentials {
       overall: order.stateMachineState?.name ?? null,
       payment: firstTransaction.stateMachineState?.name ?? null,
       shipping: firstDelivery.stateMachineState?.name ?? null
+    },
+    statusCodes: {
+      overall: order.stateMachineState?.technicalName ?? null,
+      payment: firstTransaction.stateMachineState?.technicalName ?? null,
+      shipping: firstDelivery.stateMachineState?.technicalName ?? null
     },
     shipping: {
       address: firstDelivery.shippingOrderAddress
