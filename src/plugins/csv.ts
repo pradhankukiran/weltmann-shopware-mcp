@@ -41,7 +41,7 @@ export const registerCSV: FastifyPluginAsync = fp(async (fastify) => {
   });
 
   if (parsed.errors.length > 0) {
-    fastify.log.error('CSV parsing errors:', parsed.errors);
+    fastify.log.error({ errors: parsed.errors }, 'CSV parsing errors');
     throw new Error('Failed to parse CSV file');
   }
 

@@ -186,7 +186,7 @@ const route: FastifyPluginAsync = async (fastify) => {
         if (err instanceof ZodError) {
           return reply.code(400).send({
             error: 'Validation error',
-            details: err.errors.map((e) => e.message)
+            details: err.issues.map((e) => e.message)
           });
         }
         logErrorDetails(fastify.log, err, 'orders-search');

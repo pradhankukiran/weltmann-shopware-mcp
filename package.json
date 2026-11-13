@@ -35,7 +35,7 @@
     "mcp-remote": "^0.1.16",
     "papaparse": "^5.5.3",
     "pino": "^8.17.0",
-    "zod": "^3.22.4"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/jest": "^29.5.3",

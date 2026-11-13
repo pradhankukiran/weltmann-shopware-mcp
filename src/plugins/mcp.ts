@@ -1241,16 +1241,19 @@ const registerTools = (fastifyInstance: FastifyInstance, serverInstance: McpServ
   );
 };
 
-// MCP endpoint using singleton pattern - create server once, reuse across requests
-const registerMcp: FastifyPluginAsync = fp(async (fastify) => {
-  // Create single McpServer instance at plugin initialization
+// Stateless MCP endpoint: a fresh server per request.
+// The MCP SDK does not allow one server instance to connect to more than one transport.
+const createMcpServer = (fastify: FastifyInstance): McpServer => {
   const mcpServer = new McpServer({ name: 'shopware-mcp', version: '0.1.0' });
-
-  // Register all tools once
   registerTools(fastify, mcpServer);
+  return mcpServer;
+};
 
+const registerMcp: FastifyPluginAsync = fp(async (fastify) => {
   fastify.post('/mcp', async (request, reply) => {
     reply.hijack();
+
+    const mcpServer = createMcpServer(fastify);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -1260,17 +1263,17 @@ const registerMcp: FastifyPluginAsync = fp(async (fastify) => {
     reply.raw.on('close', async () => {
       try {
         await transport.close();
+        await mcpServer.close();
       } catch (closeError) {
-        fastify.log.warn({ error: closeError }, 'Error closing MCP transport');
+        fastify.log.warn({ err: closeError }, 'Error closing MCP transport');
       }
-      // Note: Do NOT close mcpServer here - it's shared across requests
     });
 
     try {
       await mcpServer.connect(transport);
       await transport.handleRequest(request.raw, reply.raw, request.body as Record<string, unknown>);
     } catch (error) {
-      fastify.log.error({ error }, 'MCP endpoint error');
+      fastify.log.error({ err: error }, 'MCP endpoint error');
 
       if (!reply.raw.headersSent) {
         try {
@@ -1281,7 +1284,7 @@ const registerMcp: FastifyPluginAsync = fp(async (fastify) => {
             id: null
           }));
         } catch (writeError) {
-          fastify.log.error({ error: writeError }, 'Failed to send error response');
+          fastify.log.error({ err: writeError }, 'Failed to send error response');
         }
       }
     }
@@ -1298,7 +1301,7 @@ const registerMcp: FastifyPluginAsync = fp(async (fastify) => {
   fastify.get('/mcp', (_, reply) => methodNotAllowed(reply));
   fastify.delete('/mcp', (_, reply) => methodNotAllowed(reply));
 
-  fastify.log.info('Stateless MCP endpoint ready at /mcp (singleton pattern)');
+  fastify.log.info('Stateless MCP endpoint ready at /mcp');
 });
 
 export { registerMcp };
